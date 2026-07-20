@@ -4,6 +4,10 @@ import logging
 import sqlite3
 import requests
 from datetime import datetime
+from io import BytesIO
+from PIL import Image, ImageOps
+import cv2
+import numpy as np
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
@@ -11,23 +15,26 @@ from telegram.constants import ParseMode
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get('BOT_TOKEN', '8799309309:AAEy_csS6ESN8NObQlxHMss5YPmYEGOEtcc')
+TOKEN = os.environ.get('8799309309:AAEy_csS6ESN8NObQlxHMss5YPmYEGOEtcc')
+if not TOKEN:
+    logger.error("❌ BOT_TOKEN not set!")
+    exit(1)
+
 DATABASE = 'packs.db'
+TEMP_DIR = 'temp'
+
+# Create temp directory
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 # ============ DATABASE ============
 def init_db():
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS packs
-                 (pack_name TEXT PRIMARY KEY, 
-                  creator TEXT, 
-                  items TEXT, 
-                  published INTEGER, 
-                  link TEXT, 
-                  created TEXT)''')
+                 (pack_name TEXT PRIMARY KEY, creator TEXT, items TEXT, 
+                  published INTEGER, link TEXT, created TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_packs
-                 (user_id TEXT, pack_name TEXT,
-                  PRIMARY KEY (user_id, pack_name))''')
+                 (user_id TEXT, pack_name TEXT, PRIMARY KEY (user_id, pack_name))''')
     conn.commit()
     conn.close()
 
@@ -38,14 +45,9 @@ def get_pack(pack_name):
     row = c.fetchone()
     conn.close()
     if row:
-        return {
-            'pack_name': row[0], 
-            'creator': row[1], 
-            'items': json.loads(row[2]) if row[2] else [],
-            'published': bool(row[3]), 
-            'link': row[4], 
-            'created': row[5]
-        }
+        return {'pack_name': row[0], 'creator': row[1], 
+                'items': json.loads(row[2]) if row[2] else [],
+                'published': bool(row[3]), 'link': row[4], 'created': row[5]}
     return None
 
 def save_pack(pack_name, data):
@@ -93,9 +95,64 @@ def remove_user_pack(user_id, pack_name):
 
 init_db()
 
+# ============ IMAGE CONVERTER ============
+def convert_to_png(file_content, file_type):
+    """Convert any media to PNG format"""
+    try:
+        if file_type == 'photo':
+            # Convert photo to PNG
+            image = Image.open(BytesIO(file_content))
+            # Resize to 512x512
+            image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
+            # Convert to PNG
+            output = BytesIO()
+            image.save(output, format='PNG')
+            return output.getvalue()
+        
+        elif file_type == 'sticker':
+            # Sticker is already WEBP, convert to PNG
+            image = Image.open(BytesIO(file_content))
+            # Resize to 512x512
+            image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
+            output = BytesIO()
+            image.save(output, format='PNG')
+            return output.getvalue()
+        
+        elif file_type == 'video':
+            # Extract first frame from video and convert to PNG
+            # Save video temporarily
+            temp_video = os.path.join(TEMP_DIR, f"temp_video_{datetime.now().timestamp()}.mp4")
+            with open(temp_video, 'wb') as f:
+                f.write(file_content)
+            
+            # Extract first frame
+            cap = cv2.VideoCapture(temp_video)
+            ret, frame = cap.read()
+            cap.release()
+            os.remove(temp_video)
+            
+            if not ret:
+                raise Exception("Could not extract frame from video")
+            
+            # Convert frame to PIL Image
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(frame_rgb)
+            # Resize to 512x512
+            image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
+            output = BytesIO()
+            image.save(output, format='PNG')
+            return output.getvalue()
+        
+        else:
+            raise Exception(f"Unsupported file type: {file_type}")
+            
+    except Exception as e:
+        logger.error(f"Conversion error: {e}")
+        raise e
+
 # ============ USER STATES ============
-user_steps = {}  # Stores current step for each user
-user_data = {}   # Stores temporary data
+user_steps = {}
+user_data = {}
 
 # ============ KEYBOARDS ============
 def main_menu():
@@ -106,35 +163,26 @@ def main_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def back_button():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')]])
-
 # ============ START ============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = context.bot.username
-    
+    msg = f"""👋 **Welcome to Sticker Pack Bot!**
+
+✅ **Auto Convert Feature:**
+📸 Photo → PNG (512x512)
+🎬 Video → PNG (First frame, 512x512)
+🏷️ Sticker → PNG (512x512)
+
+📌 **Pack name must end with:** `_by_{bot_username}`
+
+Click below to start!"""
+
     if update.callback_query:
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text(
-            f"👋 **Welcome!**\n\n"
-            f"I will help you create Sticker Packs easily.\n\n"
-            f"📌 **Your Bot Username:** @{bot_username}\n"
-            f"📌 **Pack name must end with:** `_by_{bot_username}`\n\n"
-            f"Click below to start!",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=main_menu()
-        )
+        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu())
     else:
-        await update.message.reply_text(
-            f"👋 **Welcome!**\n\n"
-            f"I will help you create Sticker Packs easily.\n\n"
-            f"📌 **Your Bot Username:** @{bot_username}\n"
-            f"📌 **Pack name must end with:** `_by_{bot_username}`\n\n"
-            f"Click below to start!",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=main_menu()
-        )
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu())
 
 # ============ BUTTON HANDLER ============
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,13 +193,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'create_pack':
         bot_username = context.bot.username
         await query.edit_message_text(
-            f"📦 **Step 1: Give your pack a name**\n\n"
-            f"Send me a name for your sticker pack.\n\n"
-            f"⚠️ **Important:** Name must end with `_by_{bot_username}`\n\n"
-            f"📝 **Example:** `my_stickers_by_{bot_username}`\n\n"
-            f"Type /cancel to cancel.",
+            f"📦 **Step 1: Pack Name**\n\n"
+            f"Send pack name like this:\n"
+            f"`my_pack_by_{bot_username}`\n\n"
+            f"⚠️ Must end with `_by_{bot_username}`\n"
+            f"Type /cancel to cancel",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_button()
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='back_to_menu')]])
         )
         user_steps[user_id] = 'waiting_for_name'
     
@@ -162,12 +210,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "ℹ️ **How to create a sticker pack:**\n\n"
             "1️⃣ Click 'Create Sticker Pack'\n"
-            "2️⃣ Send a pack name (must end with _by_botusername)\n"
-            "3️⃣ Send PNG images as documents\n"
-            "4️⃣ Click 'Publish Pack' to create it!\n\n"
-            "📌 **First sticker MUST be PNG format!**\n"
-            "📌 PNG must be 512x512 pixels\n"
-            "📌 Max 512KB per sticker",
+            "2️⃣ Send pack name\n"
+            "3️⃣ Send **photo**, **video**, or **sticker**\n"
+            "4️⃣ Bot auto-converts to PNG\n"
+            "5️⃣ Type /done when finished\n"
+            "6️⃣ Click 'Publish Pack'\n\n"
+            "✅ All media auto-converted to PNG!",
             reply_markup=main_menu()
         )
     
@@ -191,19 +239,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await publish_pack(update, context, user_id, pack_name)
 
 # ============ SHOW MY PACKS ============
-async def show_my_packs(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id=None):
-    if not user_id:
-        user_id = str(update.effective_user.id)
-    
+async def show_my_packs(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
     query = update.callback_query
     packs = get_user_packs(user_id)
     
     if not packs:
-        await query.edit_message_text(
-            "📭 **You don't have any packs yet!**\n\nClick 'Create Sticker Pack' to start.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=main_menu()
-        )
+        await query.edit_message_text("📭 No packs yet!", reply_markup=main_menu())
         return
     
     keyboard = []
@@ -213,13 +254,8 @@ async def show_my_packs(update: Update, context: ContextTypes.DEFAULT_TYPE, user
             status = "✅" if pack_data.get('published') else "⏳"
             keyboard.append([InlineKeyboardButton(f"{status} {pack}", callback_data=f'view_pack_{pack}')])
     
-    keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')])
-    
-    await query.edit_message_text(
-        "📋 **Your Packs:**\n\n✅ = Published | ⏳ = Draft",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data='back_to_menu')])
+    await query.edit_message_text("📋 Your Packs:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ============ VIEW PACK ============
 async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
@@ -227,24 +263,16 @@ async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id,
     pack = get_pack(pack_name)
     
     if not pack or pack['creator'] != user_id:
-        await query.edit_message_text(
-            "❌ Pack not found!",
-            reply_markup=main_menu()
-        )
+        await query.edit_message_text("❌ Pack not found!", reply_markup=main_menu())
         return
     
     items = pack.get('items', [])
     published = pack.get('published', False)
-    link = pack.get('link', 'Not created yet')
-    
-    status = "✅ Published" if published else "⏳ Draft"
-    item_count = len(items)
     
     keyboard = []
-    
     if not published:
-        keyboard.append([InlineKeyboardButton("📤 Add Sticker", callback_data=f'add_to_pack_{pack_name}')])
-        if item_count > 0:
+        keyboard.append([InlineKeyboardButton("📤 Add Media", callback_data=f'add_to_pack_{pack_name}')])
+        if len(items) > 0:
             keyboard.append([InlineKeyboardButton("🚀 Publish Pack", callback_data=f'publish_pack_{pack_name}')])
     else:
         keyboard.append([InlineKeyboardButton("🔗 Get Link", callback_data=f'get_link_{pack_name}')])
@@ -252,12 +280,12 @@ async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id,
     keyboard.append([InlineKeyboardButton("🗑️ Delete Pack", callback_data=f'delete_pack_{pack_name}')])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data='my_packs')])
     
+    status = "✅ Published" if published else "⏳ Draft"
     await query.edit_message_text(
-        f"📦 **Pack: {pack_name}**\n\n"
-        f"📊 Status: {status}\n"
-        f"📸 Stickers: {item_count}\n"
-        f"🔗 Link: `{link}`\n\n"
-        f"What would you like to do?",
+        f"📦 **{pack_name}**\n\n"
+        f"Status: {status}\n"
+        f"Items: {len(items)}\n\n"
+        f"✅ Photo/Video/Sticker → PNG auto converted!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -272,16 +300,11 @@ async def get_pack_link(update: Update, context: ContextTypes.DEFAULT_TYPE, user
         return
     
     link = f"https://t.me/addstickers/{pack_name}"
-    
     await query.edit_message_text(
-        f"🔗 **Your Pack Link:**\n\n"
-        f"`{link}`\n\n"
-        f"📌 Click the link to add this pack to Telegram!\n"
-        f"📊 Total stickers: {len(pack.get('items', []))}",
+        f"🔗 **Your Pack Link:**\n\n`{link}`\n\n✅ Click to add to Telegram!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back to Pack", callback_data=f'view_pack_{pack_name}')],
-            [InlineKeyboardButton("📋 My Packs", callback_data='my_packs')]
+            [InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]
         ])
     )
 
@@ -289,74 +312,33 @@ async def get_pack_link(update: Update, context: ContextTypes.DEFAULT_TYPE, user
 async def delete_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
     query = update.callback_query
     pack = get_pack(pack_name)
-    
     if not pack or pack['creator'] != user_id:
         await query.edit_message_text("❌ Pack not found!", reply_markup=main_menu())
         return
     
     delete_pack_db(pack_name)
     remove_user_pack(user_id, pack_name)
-    
-    await query.edit_message_text(
-        f"✅ **Pack '{pack_name}' deleted successfully!**",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu()
-    )
-
-# ============ ADD TO PACK ============
-async def add_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
-    query = update.callback_query
-    
-    # Store which pack user is adding to
-    if user_id not in user_data:
-        user_data[user_id] = {}
-    user_data[user_id]['adding_to'] = pack_name
-    
-    await query.edit_message_text(
-        f"📤 **Step 2: Send your sticker**\n\n"
-        f"Send a **PNG image** as a document.\n\n"
-        f"📌 PNG must be 512x512 pixels\n"
-        f"📌 Max 512KB file size\n\n"
-        f"Send multiple stickers one by one.\n"
-        f"Type /done when finished.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back to Pack", callback_data=f'view_pack_{pack_name}')]
-        ])
-    )
-    
-    # Update step
-    user_steps[user_id] = 'waiting_for_sticker'
+    await query.edit_message_text("✅ Deleted!", reply_markup=main_menu())
 
 # ============ PUBLISH PACK ============
 async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
     query = update.callback_query
     
     pack = get_pack(pack_name)
-    
     if not pack or pack['creator'] != user_id:
         await query.edit_message_text("❌ Pack not found!", reply_markup=main_menu())
         return
     
     items = pack.get('items', [])
-    
     if not items:
-        await query.edit_message_text(
-            "❌ **Cannot publish empty pack!**\n\n"
-            "Add at least 1 sticker first.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]])
-        )
+        await query.edit_message_text("❌ Add at least 1 item!", 
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]]))
         return
     
-    await query.edit_message_text(
-        "⏳ **Publishing your pack...**\n\n"
-        "This may take a few seconds.",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await query.edit_message_text("⏳ Publishing... Please wait...")
     
     try:
-        # Get first sticker
+        # Get first item (already converted to PNG)
         first_item = items[0]
         file_id = first_item.get('file_id')
         file_info = await context.bot.get_file(file_id)
@@ -381,20 +363,16 @@ async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
                 pack['published'] = True
                 save_pack(pack_name, pack)
                 await query.edit_message_text(
-                    f"✅ **Pack already exists!**\n\n"
-                    f"🔗 `https://t.me/addstickers/{pack_name}`",
+                    f"✅ Pack already exists!\n\n🔗 `https://t.me/addstickers/{pack_name}`",
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]])
                 )
                 return
             else:
-                await query.edit_message_text(
-                    f"❌ **Error:** {error_msg}",
-                    parse_mode=ParseMode.MARKDOWN
-                )
+                await query.edit_message_text(f"❌ Error: {error_msg}")
                 return
         
-        # Add remaining stickers
+        # Add remaining items (all already PNG)
         for item in items[1:]:
             file_id = item.get('file_id')
             file_info = await context.bot.get_file(file_id)
@@ -414,13 +392,12 @@ async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
         save_pack(pack_name, pack)
         
         link = f"https://t.me/addstickers/{pack_name}"
-        
         await query.edit_message_text(
-            f"✅ **Pack published successfully!**\n\n"
-            f"📦 **Name:** {pack_name}\n"
-            f"📊 **Stickers:** {len(items)}\n"
-            f"🔗 **Link:** `{link}`\n\n"
-            f"🎉 Click the link to add this pack to Telegram!",
+            f"✅ **Pack Published!**\n\n"
+            f"📦 {pack_name}\n"
+            f"📊 {len(items)} items\n"
+            f"🔗 `{link}`\n\n"
+            f"🎉 Click link to add to Telegram!",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔗 Get Link", callback_data=f'get_link_{pack_name}')],
@@ -432,12 +409,37 @@ async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
         logger.error(f"Error: {e}")
         await query.edit_message_text(f"❌ Error: {str(e)}")
 
+# ============ ADD TO PACK ============
+async def add_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
+    query = update.callback_query
+    
+    if user_id not in user_data:
+        user_data[user_id] = {}
+    user_data[user_id]['current_pack'] = pack_name
+    user_steps[user_id] = 'waiting_for_media'
+    
+    await query.edit_message_text(
+        f"📤 **Send Photo, Video, or Sticker**\n\n"
+        f"Bot will auto-convert to PNG (512x512)\n\n"
+        f"✅ Photo → PNG\n"
+        f"✅ Video → PNG (First frame)\n"
+        f"✅ Sticker → PNG\n\n"
+        f"Type /done when finished.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]])
+    )
+
 # ============ HANDLE MESSAGES ============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     message = update.message
     
-    # Step 1: Waiting for pack name
+    # /done command
+    if message.text and message.text.lower() == '/done':
+        await done(update, context)
+        return
+    
+    # Step 1: Waiting for name
     if user_id in user_steps and user_steps[user_id] == 'waiting_for_name':
         pack_name = message.text.strip().replace(' ', '_')
         bot_username = context.bot.username
@@ -445,111 +447,106 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not pack_name.endswith(expected_suffix):
             await message.reply_text(
-                f"❌ **Wrong format!**\n\n"
-                f"Name must end with `{expected_suffix}`\n\n"
-                f"📝 Example: `my_stickers{expected_suffix}`\n\n"
-                f"Try again or type /cancel",
+                f"❌ Name must end with `{expected_suffix}`\n\n"
+                f"Example: `my_pack{expected_suffix}`",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
         
         if get_pack(pack_name):
-            await message.reply_text(
-                "❌ **This name is already taken!**\n\n"
-                "Please choose another name."
-            )
+            await message.reply_text("❌ Name already taken!")
             return
         
         # Create pack
-        data = {
-            'creator': user_id,
-            'items': [],
-            'published': False,
-            'link': f"https://t.me/addstickers/{pack_name}",
-            'created': datetime.now().isoformat()
-        }
+        data = {'creator': user_id, 'items': [], 'published': False,
+                'link': f"https://t.me/addstickers/{pack_name}",
+                'created': datetime.now().isoformat()}
         save_pack(pack_name, data)
         add_user_pack(user_id, pack_name)
         
-        # Store pack name for adding stickers
-        if user_id not in user_data:
-            user_data[user_id] = {}
-        user_data[user_id]['current_pack'] = pack_name
-        
-        # Change state
-        user_steps[user_id] = 'waiting_for_sticker'
+        user_data[user_id] = {'current_pack': pack_name}
+        user_steps[user_id] = 'waiting_for_media'
         
         await message.reply_text(
-            f"✅ **Pack '{pack_name}' created!**\n\n"
-            f"📤 **Step 2: Send your stickers**\n\n"
-            f"Send **PNG images** as documents.\n"
-            f"📌 512x512 pixels, max 512KB\n\n"
-            f"Send multiple stickers one by one.\n"
-            f"Type /done when finished.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')]
-            ])
+            f"✅ Pack '{pack_name}' created!\n\n"
+            "📤 Send **photo**, **video**, or **sticker**\n"
+            "Bot will auto-convert to PNG!\n"
+            "Type /done when finished.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')]])
         )
         return
     
-    # Step 2: Waiting for stickers
-    elif user_id in user_steps and user_steps[user_id] == 'waiting_for_sticker':
-        # Check if user has a pack
+    # Step 2: Waiting for media
+    if user_id in user_steps and user_steps[user_id] == 'waiting_for_media':
         pack_name = user_data.get(user_id, {}).get('current_pack')
-        
         if not pack_name:
-            await message.reply_text(
-                "❌ No pack found! Use /start to create one."
-            )
+            await message.reply_text("❌ No pack found!")
             return
         
-        # Handle document
-        if message.document:
-            doc = message.document
-            if doc.mime_type == 'image/png':
-                pack = get_pack(pack_name)
-                if not pack or pack['creator'] != user_id:
-                    await message.reply_text("❌ Pack not found!")
-                    return
-                
-                # Add sticker
-                items = pack.get('items', [])
-                items.append({'type': 'png_sticker', 'file_id': doc.file_id})
-                pack['items'] = items
-                save_pack(pack_name, pack)
-                
-                await message.reply_text(
-                    f"✅ **Sticker added!** ({len(items)} total)\n\n"
-                    f"Send more or type /done to finish."
-                )
-            else:
-                await message.reply_text(
-                    "❌ **Only PNG images are supported!**\n\n"
-                    "Send a PNG file as a document."
-                )
+        pack = get_pack(pack_name)
+        if not pack:
+            await message.reply_text("❌ Pack not found!")
+            return
+        
+        # Detect media type
+        file_id = None
+        media_type = None
+        
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            media_type = 'photo'
+        elif message.video:
+            file_id = message.video.file_id
+            media_type = 'video'
+        elif message.sticker:
+            file_id = message.sticker.file_id
+            media_type = 'sticker'
         else:
-            await message.reply_text(
-                "❌ **Send a PNG file as a document!**\n\n"
-                "Use the 📎 attachment button and select 'File'."
+            await message.reply_text("❌ Send Photo, Video, or Sticker!")
+            return
+        
+        # Download and convert to PNG
+        try:
+            await message.reply_text("🔄 Converting to PNG...")
+            
+            file_info = await context.bot.get_file(file_id)
+            file_content = await file_info.download_as_bytearray()
+            
+            # Convert to PNG
+            png_content = convert_to_png(file_content, media_type)
+            
+            # Upload converted PNG to Telegram
+            png_file = BytesIO(png_content)
+            png_file.name = 'sticker.png'
+            
+            # Send as document to get file_id
+            sent_msg = await message.reply_document(
+                document=png_file,
+                caption=f"✅ Converted from {media_type} to PNG (512x512)"
             )
+            
+            # Get the file_id of uploaded PNG
+            png_file_id = sent_msg.document.file_id
+            
+            # Add to pack
+            items = pack.get('items', [])
+            items.append({'type': 'png_sticker', 'file_id': png_file_id})
+            pack['items'] = items
+            save_pack(pack_name, pack)
+            
+            await message.reply_text(f"✅ Added! ({len(items)} total)")
+            
+        except Exception as e:
+            logger.error(f"Conversion error: {e}")
+            await message.reply_text(f"❌ Error converting: {str(e)}")
+        
         return
     
-    # /done command handler
-    elif message.text and message.text.lower() == '/done':
-        await done(update, context)
-        return
-    
-    # Default
-    await message.reply_text(
-        "Use /start to create a sticker pack!",
-        reply_markup=main_menu()
-    )
+    await message.reply_text("Use /start", reply_markup=main_menu())
 
 # ============ DONE COMMAND ============
 async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    
     pack_name = user_data.get(user_id, {}).get('current_pack')
     
     if not pack_name:
@@ -557,30 +554,24 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     pack = get_pack(pack_name)
-    
     if not pack or pack['creator'] != user_id:
         await update.message.reply_text("❌ Pack not found!")
         return
     
     items = pack.get('items', [])
-    
     if not items:
-        await update.message.reply_text(
-            "❌ **No stickers added!**\n\n"
-            "Send at least 1 PNG image first."
-        )
+        await update.message.reply_text("❌ Add at least 1 item!")
         return
     
-    # Show summary
     await update.message.reply_text(
-        f"📦 **Pack Summary:**\n\n"
-        f"📦 Name: {pack_name}\n"
-        f"📸 Stickers: {len(items)}\n\n"
-        f"What would you like to do?",
+        f"📦 **Pack ready!**\n\n"
+        f"Name: {pack_name}\n"
+        f"Items: {len(items)}\n\n"
+        f"✅ All items converted to PNG!\n"
+        f"Click publish to create!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🚀 Publish Pack", callback_data=f'publish_pack_{pack_name}')],
-            [InlineKeyboardButton("📤 Add More", callback_data=f'add_to_pack_{pack_name}')],
             [InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')]
         ])
     )
@@ -592,24 +583,21 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_steps[user_id]
     if user_id in user_data:
         del user_data[user_id]
-    await update.message.reply_text(
-        "❌ **Cancelled!**\n\nUse /start to begin again.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu()
-    )
+    await update.message.reply_text("❌ Cancelled!", reply_markup=main_menu())
 
 # ============ MAIN ============
 def main():
     app = Application.builder().token(TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("done", done))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
-    
-    print("🤖 Bot is starting...")
+    app.add_handler(MessageHandler(
+        filters.PHOTO | filters.VIDEO | filters.Sticker.ALL, 
+        handle_message
+    ))
+    print("🤖 Bot started!")
     app.run_polling()
 
 if __name__ == '__main__':
