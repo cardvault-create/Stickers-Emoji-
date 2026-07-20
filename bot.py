@@ -107,7 +107,7 @@ def remove_user_pack(user_id, pack_name):
 
 init_db()
 
-# ============ VIDEO PROCESSOR - 3 SECOND CUT ============
+# ============ VIDEO PROCESSOR ============
 def process_video_to_webm(file_content):
     """Convert video to WEBM - exactly 3 seconds"""
     try:
@@ -120,7 +120,6 @@ def process_video_to_webm(file_content):
         
         output_path = input_path + '.webm'
         
-        # Always take first 3 seconds
         cmd = [
             'ffmpeg', '-i', input_path,
             '-t', '3',
@@ -213,7 +212,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == 'help':
         await query.edit_message_text(
-            "📖 **How to use:**\n\n1️⃣ Click 'Create Sticker Pack'\n2️⃣ Send any name\n3️⃣ Send photo/video/sticker\n4️⃣ Type /done\n5️⃣ Click 'Publish'",
+            "📖 **How to use:**\n\n1️⃣ Click 'Create Sticker Pack'\n2️⃣ Send any name\n3️⃣ Send photo/video/sticker\n4️⃣ Type /done to publish!\n\n✅ Pack auto-publishes when you type /done",
             reply_markup=main_menu()
         )
     
@@ -231,10 +230,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith('get_link_'):
         pack_name = query.data.replace('get_link_', '')
         await get_pack_link(update, context, user_id, pack_name)
-    
-    elif query.data.startswith('publish_pack_'):
-        pack_name = query.data.replace('publish_pack_', '')
-        await publish_pack(update, context, user_id, pack_name)
 
 async def show_my_packs(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
     query = update.callback_query
@@ -269,7 +264,7 @@ async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id,
     if not published:
         keyboard.append([InlineKeyboardButton("📤 Add Media", callback_data=f'add_to_pack_{pack_name}')])
         if len(items) > 0:
-            keyboard.append([InlineKeyboardButton("🚀 Publish", callback_data=f'publish_pack_{pack_name}')])
+            keyboard.append([InlineKeyboardButton("🚀 Publish Now", callback_data=f'publish_now_{pack_name}')])
     else:
         keyboard.append([InlineKeyboardButton("🔗 Get Link", callback_data=f'get_link_{pack_name}')])
     
@@ -292,9 +287,12 @@ async def get_pack_link(update: Update, context: ContextTypes.DEFAULT_TYPE, user
     
     link = f"https://t.me/addstickers/{pack_name}"
     await query.edit_message_text(
-        f"🔗 **Your Link:**\n\n`{link}`\n\n✅ Click to add to Telegram!",
+        f"🔗 **Your Pack Link:**\n\n`{link}`\n\n✅ Click to add to Telegram!",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]])
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📦 Open Pack", url=link)],
+            [InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]
+        ])
     )
 
 async def delete_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
@@ -309,21 +307,22 @@ async def delete_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
     await query.edit_message_text("✅ Deleted!", reply_markup=main_menu())
 
 # ============ PUBLISH PACK ============
-async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
+async def publish_pack_now(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
     query = update.callback_query
-    
+    await query.edit_message_text("⏳ Publishing...")
+    await do_publish(update, context, user_id, pack_name)
+
+async def do_publish(update, context, user_id, pack_name):
+    """Actual publish function"""
     pack = get_pack(pack_name)
     if not pack or pack['creator'] != user_id:
-        await query.edit_message_text("❌ Pack not found!", reply_markup=main_menu())
+        await update.effective_message.reply_text("❌ Pack not found!")
         return
     
     items = pack.get('items', [])
     if not items:
-        await query.edit_message_text("❌ Add at least 1 item!", 
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]]))
+        await update.effective_message.reply_text("❌ Add at least 1 item!")
         return
-    
-    await query.edit_message_text("⏳ Publishing...")
     
     try:
         # Get first item
@@ -355,14 +354,10 @@ async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
             if 'name is already occupied' in error:
                 pack['published'] = True
                 save_pack(pack_name, pack)
-                await query.edit_message_text(
-                    f"✅ Pack exists!\n\n🔗 `https://t.me/addstickers/{pack_name}`",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
+                return True
             else:
-                await query.edit_message_text(f"❌ Error: {error}")
-                return
+                await update.effective_message.reply_text(f"❌ Error: {error}")
+                return False
         
         # Add remaining items
         for item in items[1:]:
@@ -383,20 +378,12 @@ async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
         
         pack['published'] = True
         save_pack(pack_name, pack)
-        
-        link = f"https://t.me/addstickers/{pack_name}"
-        await query.edit_message_text(
-            f"✅ **Published!**\n\n📦 {pack_name}\n📊 {len(items)} items\n🔗 `{link}`\n\n🎉 Click link to add!",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Get Link", callback_data=f'get_link_{pack_name}')],
-                [InlineKeyboardButton("📋 My Packs", callback_data='my_packs')]
-            ])
-        )
+        return True
         
     except Exception as e:
         logger.error(f"Publish error: {e}")
-        await query.edit_message_text(f"❌ Error: {str(e)}")
+        await update.effective_message.reply_text(f"❌ Error: {str(e)}")
+        return False
 
 # ============ ADD TO PACK ============
 async def add_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
@@ -412,7 +399,7 @@ async def add_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
         f"✅ Video → 3 sec Video Sticker\n"
         f"✅ Photo → Static Sticker\n"
         f"✅ Sticker → Same format\n\n"
-        f"Type /done when finished.",
+        f"Type /done to publish!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]])
     )
@@ -450,7 +437,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"✅ **Pack '{pack_name}' created!**\n\n"
             f"📤 Send **photo**, **video**, or **sticker**\n"
-            f"Type /done when finished.",
+            f"Type /done to publish!",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')]])
         )
@@ -542,15 +529,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_pack(pack_name, pack)
             
             pack_link = f"https://t.me/addstickers/{pack_name}"
-            pack_button = InlineKeyboardButton("📦 Open Pack", url=pack_link)
             
             await message.reply_text(
                 f"✅ **Added to {pack_name}**\n\n"
                 f"📦 Pack: `{pack_name}`\n"
+                f"📊 Total: {len(items)} items\n"
                 f"🔗 Link: `{pack_link}`\n\n"
-                f"Send more or type /done",
+                f"Type /done to publish!",
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=InlineKeyboardMarkup([[pack_button]])
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📦 Open Pack", url=pack_link)],
+                    [InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')]
+                ])
             )
             
         except Exception as e:
@@ -561,6 +551,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await message.reply_text("Use /start", reply_markup=main_menu())
 
+# ============ DONE - AUTO PUBLISH ============
 async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     pack_name = user_data.get(user_id, {}).get('current_pack')
@@ -579,19 +570,31 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Add at least 1 item!")
         return
     
-    pack_link = f"https://t.me/addstickers/{pack_name}"
-    await update.message.reply_text(
-        f"📦 **Pack Ready!**\n\n"
-        f"📦 Name: `{pack_name}`\n"
-        f"📊 Items: {len(items)}\n"
-        f"🔗 Link: `{pack_link}`\n\n"
-        f"✅ Click Publish to create!",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚀 Publish Pack", callback_data=f'publish_pack_{pack_name}')],
-            [InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')]
-        ])
-    )
+    await update.message.reply_text("⏳ Publishing your pack...")
+    
+    # Auto publish
+    success = await do_publish(update, context, user_id, pack_name)
+    
+    if success:
+        pack_link = f"https://t.me/addstickers/{pack_name}"
+        await update.message.reply_text(
+            f"✅ **Pack Published Successfully!**\n\n"
+            f"📦 **Name:** `{pack_name}`\n"
+            f"📊 **Items:** {len(items)}\n"
+            f"🔗 **Link:** `{pack_link}`\n\n"
+            f"🎉 Click the button below to add to Telegram!",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📦 Open Pack", url=pack_link)],
+                [InlineKeyboardButton("📋 My Packs", callback_data='my_packs')]
+            ])
+        )
+        
+        # Clear user state
+        if user_id in user_data:
+            del user_data[user_id]
+        if user_id in user_steps:
+            del user_steps[user_id]
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -601,6 +604,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_data[user_id]
     await update.message.reply_text("❌ Cancelled!", reply_markup=main_menu())
 
+# ============ CALLBACK FOR PUBLISH NOW ============
+async def publish_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    pack_name = query.data.replace('publish_now_', '')
+    await publish_pack_now(update, context, user_id, pack_name)
+
+# ============ MAIN ============
 def main():
     try:
         print("\n" + "="*60)
@@ -616,6 +628,7 @@ def main():
         application.add_handler(CommandHandler("cancel", cancel))
         application.add_handler(CommandHandler("done", done))
         application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_handler(CallbackQueryHandler(publish_now_handler, pattern='^publish_now_'))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Sticker.ALL, handle_message))
         
