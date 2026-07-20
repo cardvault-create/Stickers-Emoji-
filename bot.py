@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import requests
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -14,7 +15,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot token from environment variable
-TOKEN = os.environ.get('BOT_TOKEN', '8799309309:AAEy_csS6ESN8NObQlxHMss5YPmYEGOEtcc')
+TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 
 # Data storage file
 DATA_FILE = 'pack_data.json'
@@ -24,7 +25,7 @@ def load_data():
     try:
         with open(DATA_FILE, 'r') as f:
             return json.load(f)
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return {'sticker_packs': {}, 'emoji_packs': {}, 'user_packs': {}}
 
 def save_data(data):
@@ -34,13 +35,11 @@ def save_data(data):
 # Initialize data
 data = load_data()
 
-# User states for pack creation
+# User states
 user_states = {}
 
-# Start command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    
+# Main menu keyboard
+def get_main_menu():
     keyboard = [
         [
             InlineKeyboardButton("📦 Create Sticker Pack", callback_data='create_sticker'),
@@ -51,14 +50,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("ℹ️ Help", callback_data='help')
         ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "👋 Welcome to Sticker & Emoji Pack Bot!\n\n"
-        "I can help you create and manage your own sticker and emoji packs.\n"
-        "Choose an option below:",
-        reply_markup=reply_markup
-    )
+    return InlineKeyboardMarkup(keyboard)
+
+# Start command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(
+            "👋 Welcome to Sticker & Emoji Pack Bot!\n\n"
+            "I can help you create and manage your own sticker and emoji packs.\n"
+            "Choose an option below:",
+            reply_markup=get_main_menu()
+        )
+    else:
+        await update.message.reply_text(
+            "👋 Welcome to Sticker & Emoji Pack Bot!\n\n"
+            "I can help you create and manage your own sticker and emoji packs.\n"
+            "Choose an option below:",
+            reply_markup=get_main_menu()
+        )
 
 # Handle callback queries
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -66,73 +77,103 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = str(query.from_user.id)
-    data = query.data
+    data_callback = query.data
     
-    if data == 'create_sticker':
+    if data_callback == 'create_sticker':
         await query.edit_message_text(
             "📦 **Create Sticker Pack**\n\n"
             "Please send me the **name** for your sticker pack.\n"
-            "Example: `My Cool Stickers`\n\n"
-            "Type /cancel to cancel the process.",
-            parse_mode=ParseMode.MARKDOWN
+            "Example: `MyCoolStickers`\n\n"
+            "⚠️ Name should be without spaces (use underscores or camelCase)\n"
+            "Type /cancel to cancel.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='back_to_main')]])
         )
         user_states[user_id] = 'awaiting_sticker_name'
     
-    elif data == 'create_emoji':
+    elif data_callback == 'create_emoji':
         await query.edit_message_text(
             "🎨 **Create Emoji Pack**\n\n"
             "Please send me the **name** for your emoji pack.\n"
-            "Example: `Funny Emojis`\n\n"
-            "Type /cancel to cancel the process.",
-            parse_mode=ParseMode.MARKDOWN
+            "Example: `MyFunnyEmojis`\n\n"
+            "⚠️ Name should be without spaces (use underscores or camelCase)\n"
+            "Type /cancel to cancel.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='back_to_main')]])
         )
         user_states[user_id] = 'awaiting_emoji_name'
     
-    elif data == 'my_packs':
+    elif data_callback == 'my_packs':
         await show_my_packs(update, context, user_id)
     
-    elif data == 'help':
+    elif data_callback == 'help':
         await query.edit_message_text(
             "ℹ️ **How to use this bot:**\n\n"
             "1. Click 'Create Sticker Pack' to create a sticker pack\n"
             "2. Click 'Create Emoji Pack' to create an emoji pack\n"
-            "3. Send images/videos/stickers to add to your packs\n"
-            "4. Use 'My Packs' to view and manage your packs\n\n"
-            "**Features:**\n"
-            "✅ Create unlimited packs\n"
-            "✅ Add photos, videos, and stickers\n"
-            "✅ Get shareable links\n"
-            "✅ Manage your packs easily",
-            parse_mode=ParseMode.MARKDOWN
+            "3. Send images to add to sticker packs\n"
+            "4. Send images/videos/stickers to add to emoji packs\n"
+            "5. Use 'My Packs' to view and manage your packs\n\n"
+            "**Sticker Pack:** Only images/stickers allowed\n"
+            "**Emoji Pack:** Images, videos, and stickers allowed\n\n"
+            "**Get Real Pack Link:**\n"
+            "- For stickers: Use @Stickers bot\n"
+            "- For emojis: Use @Emoji bot",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='back_to_main')]])
         )
     
-    elif data.startswith('view_pack_'):
-        pack_type, pack_name = data.replace('view_pack_', '').split('_', 1)
-        await view_pack(update, context, user_id, pack_type, pack_name)
+    elif data_callback == 'back_to_main':
+        await start(update, context)
     
-    elif data.startswith('add_to_pack_'):
-        pack_type, pack_name = data.replace('add_to_pack_', '').split('_', 1)
-        user_states[user_id] = f'adding_to_{pack_type}_{pack_name}'
-        await query.edit_message_text(
-            f"📤 **Adding to {pack_type} pack: {pack_name}**\n\n"
-            "Send me a photo, video, or sticker to add to this pack.\n"
-            "Type /cancel to cancel.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+    elif data_callback.startswith('view_pack_'):
+        parts = data_callback.replace('view_pack_', '').split('_', 1)
+        if len(parts) == 2:
+            pack_type, pack_name = parts
+            await view_pack(update, context, user_id, pack_type, pack_name)
     
-    elif data.startswith('delete_pack_'):
-        pack_type, pack_name = data.replace('delete_pack_', '').split('_', 1)
-        await delete_pack(update, context, user_id, pack_type, pack_name)
+    elif data_callback.startswith('add_to_pack_'):
+        parts = data_callback.replace('add_to_pack_', '').split('_', 1)
+        if len(parts) == 2:
+            pack_type, pack_name = parts
+            user_states[user_id] = f'adding_to_{pack_type}_{pack_name}'
+            
+            if pack_type == 'sticker':
+                msg = f"📤 **Adding to Sticker Pack: {pack_name}**\n\nSend me a **photo** or **sticker** to add to this pack.\nType /cancel to cancel."
+            else:
+                msg = f"📤 **Adding to Emoji Pack: {pack_name}**\n\nSend me a **photo**, **video**, or **sticker** to add to this pack.\nType /cancel to cancel."
+            
+            await query.edit_message_text(
+                msg,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_type}_{pack_name}')]])
+            )
+    
+    elif data_callback.startswith('delete_pack_'):
+        parts = data_callback.replace('delete_pack_', '').split('_', 1)
+        if len(parts) == 2:
+            pack_type, pack_name = parts
+            await delete_pack(update, context, user_id, pack_type, pack_name)
+    
+    elif data_callback.startswith('get_link_'):
+        parts = data_callback.replace('get_link_', '').split('_', 1)
+        if len(parts) == 2:
+            pack_type, pack_name = parts
+            await get_pack_link(update, context, user_id, pack_type, pack_name)
 
 # Show user's packs
-async def show_my_packs(update, context, user_id):
+async def show_my_packs(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id=None):
+    if not user_id:
+        user_id = str(update.effective_user.id)
+    
     query = update.callback_query
     user_packs = data['user_packs'].get(user_id, {'sticker': [], 'emoji': []})
     
     if not user_packs['sticker'] and not user_packs['emoji']:
         await query.edit_message_text(
             "📭 You don't have any packs yet!\n\n"
-            "Click 'Create Sticker Pack' or 'Create Emoji Pack' to get started."
+            "Click 'Create Sticker Pack' or 'Create Emoji Pack' to get started.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='back_to_main')]])
         )
         return
     
@@ -163,7 +204,7 @@ async def show_my_packs(update, context, user_id):
     )
 
 # View specific pack
-async def view_pack(update, context, user_id, pack_type, pack_name):
+async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_type, pack_name):
     query = update.callback_query
     
     if pack_type == 'sticker':
@@ -172,7 +213,10 @@ async def view_pack(update, context, user_id, pack_type, pack_name):
         pack_data = data['emoji_packs'].get(pack_name, {})
     
     if not pack_data or pack_data.get('creator') != user_id:
-        await query.edit_message_text("❌ Pack not found or you don't have permission!")
+        await query.edit_message_text(
+            "❌ Pack not found or you don't have permission!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='my_packs')]])
+        )
         return
     
     items_count = len(pack_data.get('items', []))
@@ -180,7 +224,7 @@ async def view_pack(update, context, user_id, pack_type, pack_name):
     
     keyboard = [
         [InlineKeyboardButton("📤 Add Item", callback_data=f'add_to_pack_{pack_type}_{pack_name}')],
-        [InlineKeyboardButton("🔗 Get Link", callback_data=f'get_link_{pack_type}_{pack_name}')],
+        [InlineKeyboardButton("🔗 Get Shareable Link", callback_data=f'get_link_{pack_type}_{pack_name}')],
         [InlineKeyboardButton("🗑️ Delete Pack", callback_data=f'delete_pack_{pack_type}_{pack_name}')],
         [InlineKeyboardButton("🔙 Back to My Packs", callback_data='my_packs')]
     ]
@@ -195,8 +239,41 @@ async def view_pack(update, context, user_id, pack_type, pack_name):
         reply_markup=reply_markup
     )
 
+# Get pack link
+async def get_pack_link(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_type, pack_name):
+    query = update.callback_query
+    
+    if pack_type == 'sticker':
+        pack_data = data['sticker_packs'].get(pack_name, {})
+    else:
+        pack_data = data['emoji_packs'].get(pack_name, {})
+    
+    if not pack_data:
+        await query.edit_message_text("❌ Pack not found!")
+        return
+    
+    link = pack_data.get('link', 'No link available')
+    
+    # For real Telegram packs, you need to register with @Stickers or @Emoji bot
+    if pack_type == 'sticker':
+        instructions = "To create a real sticker pack:\n1. Use @Stickers bot\n2. Send /newpack\n3. Follow the instructions"
+    else:
+        instructions = "To create a real emoji pack:\n1. Use @Emoji bot\n2. Send /newpack\n3. Follow the instructions"
+    
+    await query.edit_message_text(
+        f"🔗 **{pack_type.title()} Pack Link**\n\n"
+        f"📦 Pack: {pack_name}\n"
+        f"🔗 Link: `{link}`\n\n"
+        f"ℹ️ {instructions}\n\n"
+        f"Note: This link will work after you register the pack with @Stickers or @Emoji bot.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back to Pack", callback_data=f'view_pack_{pack_type}_{pack_name}')]
+        ])
+    )
+
 # Delete pack
-async def delete_pack(update, context, user_id, pack_type, pack_name):
+async def delete_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_type, pack_name):
     query = update.callback_query
     
     if pack_type == 'sticker':
@@ -214,7 +291,8 @@ async def delete_pack(update, context, user_id, pack_type, pack_name):
     save_data(data)
     
     await query.edit_message_text(
-        f"✅ Pack '{pack_name}' has been deleted successfully!"
+        f"✅ Pack '{pack_name}' has been deleted successfully!",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to My Packs", callback_data='my_packs')]])
     )
 
 # Handle messages
@@ -226,27 +304,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in user_states:
         await message.reply_text(
             "Please use the buttons to create a pack first!\n"
-            "Type /start to begin."
+            "Type /start to begin.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data='back_to_main')]])
         )
         return
     
     state = user_states[user_id]
     
     if state == 'awaiting_sticker_name':
-        pack_name = message.text.strip()
+        pack_name = message.text.strip().replace(' ', '_')
         if not pack_name:
             await message.reply_text("Please send a valid name!")
             return
         
         if pack_name in data['sticker_packs']:
-            await message.reply_text("❌ A sticker pack with this name already exists!")
+            await message.reply_text("❌ A sticker pack with this name already exists! Please choose another name.")
             return
         
         # Create sticker pack
         data['sticker_packs'][pack_name] = {
             'creator': user_id,
             'items': [],
-            'link': f"https://t.me/addstickers/{pack_name.replace(' ', '_')}",
+            'link': f"https://t.me/addstickers/{pack_name}",
             'created': datetime.now().isoformat()
         }
         
@@ -257,28 +336,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         del user_states[user_id]
         
+        keyboard = [
+            [InlineKeyboardButton("📤 Add Sticker", callback_data=f'add_to_pack_sticker_{pack_name}')],
+            [InlineKeyboardButton("🔗 Get Link", callback_data=f'get_link_sticker_{pack_name}')],
+            [InlineKeyboardButton("📋 My Packs", callback_data='my_packs')],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data='back_to_main')]
+        ]
+        
         await message.reply_text(
             f"✅ Sticker pack '{pack_name}' created successfully!\n\n"
-            f"🔗 Link: {data['sticker_packs'][pack_name]['link']}\n\n"
-            "Send me photos/videos/stickers to add to this pack!\n"
-            "Type /start to go back to main menu."
+            f"🔗 Link: `{data['sticker_packs'][pack_name]['link']}`\n\n"
+            "Send me photos or stickers to add to this pack!\n"
+            "Or use the buttons below:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
     elif state == 'awaiting_emoji_name':
-        pack_name = message.text.strip()
+        pack_name = message.text.strip().replace(' ', '_')
         if not pack_name:
             await message.reply_text("Please send a valid name!")
             return
         
         if pack_name in data['emoji_packs']:
-            await message.reply_text("❌ An emoji pack with this name already exists!")
+            await message.reply_text("❌ An emoji pack with this name already exists! Please choose another name.")
             return
         
         # Create emoji pack
         data['emoji_packs'][pack_name] = {
             'creator': user_id,
             'items': [],
-            'link': f"https://t.me/addemoji/{pack_name.replace(' ', '_')}",
+            'link': f"https://t.me/addemoji/{pack_name}",
             'created': datetime.now().isoformat()
         }
         
@@ -289,56 +377,94 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         del user_states[user_id]
         
+        keyboard = [
+            [InlineKeyboardButton("📤 Add Emoji", callback_data=f'add_to_pack_emoji_{pack_name}')],
+            [InlineKeyboardButton("🔗 Get Link", callback_data=f'get_link_emoji_{pack_name}')],
+            [InlineKeyboardButton("📋 My Packs", callback_data='my_packs')],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data='back_to_main')]
+        ]
+        
         await message.reply_text(
             f"✅ Emoji pack '{pack_name}' created successfully!\n\n"
-            f"🔗 Link: {data['emoji_packs'][pack_name]['link']}\n\n"
-            "Send me photos/videos/stickers to add to this pack!\n"
-            "Type /start to go back to main menu."
+            f"🔗 Link: `{data['emoji_packs'][pack_name]['link']}`\n\n"
+            "Send me photos, videos, or stickers to add to this pack!\n"
+            "Or use the buttons below:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
     elif state.startswith('adding_to_'):
         # Add item to pack
-        _, pack_type, pack_name = state.split('_', 2)
+        parts = state.split('_', 2)
+        if len(parts) < 3:
+            return
+        
+        _, pack_type, pack_name = parts
         
         if pack_type == 'sticker':
             pack_data = data['sticker_packs'].get(pack_name)
-        else:
+            if not pack_data:
+                await message.reply_text("❌ Sticker pack not found!")
+                del user_states[user_id]
+                return
+            
+            # Only allow photos and stickers for sticker packs
+            if message.photo:
+                file_id = message.photo[-1].file_id
+                item_data = {'type': 'photo', 'file_id': file_id}
+            elif message.sticker:
+                file_id = message.sticker.file_id
+                item_data = {'type': 'sticker', 'file_id': file_id}
+            else:
+                await message.reply_text(
+                    "❌ Sticker packs only accept **photos** or **stickers**!\n"
+                    "Please send a photo or sticker.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+        else:  # emoji pack
             pack_data = data['emoji_packs'].get(pack_name)
+            if not pack_data:
+                await message.reply_text("❌ Emoji pack not found!")
+                del user_states[user_id]
+                return
+            
+            # Allow photos, videos, and stickers for emoji packs
+            if message.photo:
+                file_id = message.photo[-1].file_id
+                item_data = {'type': 'photo', 'file_id': file_id}
+            elif message.video:
+                file_id = message.video.file_id
+                item_data = {'type': 'video', 'file_id': file_id}
+            elif message.sticker:
+                file_id = message.sticker.file_id
+                item_data = {'type': 'sticker', 'file_id': file_id}
+            else:
+                await message.reply_text(
+                    "❌ Emoji packs accept **photos**, **videos**, or **stickers**!\n"
+                    "Please send a valid media file.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
         
-        if not pack_data or pack_data.get('creator') != user_id:
-            await message.reply_text("❌ Pack not found or you don't have permission!")
+        if pack_data.get('creator') != user_id:
+            await message.reply_text("❌ You don't have permission to add to this pack!")
             del user_states[user_id]
             return
         
-        # Handle different media types
-        item_data = {}
-        
-        if message.photo:
-            file_id = message.photo[-1].file_id
-            item_data = {'type': 'photo', 'file_id': file_id}
-        elif message.video:
-            file_id = message.video.file_id
-            item_data = {'type': 'video', 'file_id': file_id}
-        elif message.sticker:
-            file_id = message.sticker.file_id
-            item_data = {'type': 'sticker', 'file_id': file_id}
-        elif message.document:
-            file_id = message.document.file_id
-            item_data = {'type': 'document', 'file_id': file_id}
-        else:
-            await message.reply_text(
-                "❌ Please send a photo, video, or sticker!\n"
-                "Type /cancel to cancel."
-            )
-            return
-        
+        # Add item to pack
         pack_data['items'].append(item_data)
         save_data(data)
         
+        # Keep the user in adding state
         await message.reply_text(
             f"✅ Item added to {pack_type} pack '{pack_name}'!\n\n"
-            f"Total items: {len(pack_data['items'])}\n"
-            "Send more items or type /start to go back."
+            f"📊 Total items: {len(pack_data['items'])}\n"
+            "Send more items or use the buttons below:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back to Pack", callback_data=f'view_pack_{pack_type}_{pack_name}')],
+                [InlineKeyboardButton("🏠 Main Menu", callback_data='back_to_main')]
+            ])
         )
 
 # Cancel command
@@ -348,15 +474,22 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_states[user_id]
         await update.message.reply_text(
             "❌ Process cancelled!\n"
-            "Type /start to begin again."
+            "Type /start to begin again.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data='back_to_main')]])
         )
     else:
-        await update.message.reply_text("No active process to cancel.")
+        await update.message.reply_text(
+            "No active process to cancel.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data='back_to_main')]])
+        )
 
-# Back to main
-async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await start(update, context)
+# Error handler
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update {update} caused error {context.error}")
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "❌ An error occurred! Please try again or type /start."
+        )
 
 # Main function
 def main():
@@ -367,11 +500,14 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(CallbackQueryHandler(back_to_main, pattern='^back_to_main$'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Sticker.ALL | filters.Document.ALL, handle_message))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Sticker.ALL, handle_message))
+    
+    # Add error handler
+    application.add_error_handler(error_handler)
     
     # Start the bot
+    print("Bot is starting...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
