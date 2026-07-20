@@ -132,9 +132,9 @@ def clear_selected_pack(user_id):
 
 init_db()
 
-# ============ VIDEO PROCESSOR ============
-def process_video_to_webm(file_content):
-    """Convert video to WEBM - exactly 3 seconds"""
+# ============ VIDEO PROCESSOR - ONLY CUT TO 3 SEC ============
+def cut_video_to_3sec(file_content):
+    """Only cut video to 3 seconds - NO CONVERSION TO PNG"""
     try:
         if not FFMPEG_AVAILABLE:
             raise Exception("FFmpeg not installed!")
@@ -143,83 +143,52 @@ def process_video_to_webm(file_content):
             f.write(file_content)
             input_path = f.name
         
-        output_path = input_path + '.webm'
+        output_path = input_path + '_cut.mp4'
         
+        # Only cut to 3 seconds, keep original format
         cmd = [
             'ffmpeg', '-i', input_path,
             '-t', '3',
-            '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2,fps=30',
-            '-c:v', 'libvpx-vp9',
-            '-b:v', '0',
-            '-crf', '30',
-            '-pix_fmt', 'yuva420p',
-            '-an',
+            '-c', 'copy',
             '-y',
             output_path
         ]
         
-        subprocess.run(cmd, capture_output=True, timeout=120)
+        subprocess.run(cmd, capture_output=True, timeout=60)
+        
+        # If copy fails, try re-encode
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            cmd = [
+                'ffmpeg', '-i', input_path,
+                '-t', '3',
+                '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2',
+                '-c:v', 'libx264',
+                '-crf', '23',
+                '-preset', 'fast',
+                '-y',
+                output_path
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=60)
         
         with open(output_path, 'rb') as f:
-            webm_content = f.read()
+            video_content = f.read()
         
         os.unlink(input_path)
         if os.path.exists(output_path):
             os.unlink(output_path)
         
-        if len(webm_content) == 0:
-            raise Exception("Video processing failed")
+        if len(video_content) == 0:
+            raise Exception("Video cutting failed")
         
-        return webm_content
-        
-    except Exception as e:
-        logger.error(f"Video error: {e}")
-        raise e
-
-def extract_first_frame_png(file_content):
-    """Extract first frame from video as PNG"""
-    try:
-        if not FFMPEG_AVAILABLE:
-            raise Exception("FFmpeg not installed!")
-        
-        with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as f:
-            f.write(file_content)
-            video_path = f.name
-        
-        png_path = video_path + '.png'
-        cmd = ['ffmpeg', '-i', video_path, '-vframes', '1', '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2', '-y', png_path]
-        subprocess.run(cmd, capture_output=True, timeout=30)
-        
-        with open(png_path, 'rb') as f:
-            png_content = f.read()
-        
-        os.unlink(video_path)
-        if os.path.exists(png_path):
-            os.unlink(png_path)
-        
-        return png_content
+        return video_content
         
     except Exception as e:
-        logger.error(f"Frame extraction error: {e}")
-        raise e
-
-def process_photo_to_png(file_content):
-    """Convert photo to PNG"""
-    try:
-        image = Image.open(BytesIO(file_content))
-        if image.mode in ('RGBA', 'LA', 'P'):
-            image = image.convert('RGB')
-        image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
-        output = BytesIO()
-        image.save(output, format='PNG', optimize=True)
-        return output.getvalue()
-    except Exception as e:
-        logger.error(f"Photo error: {e}")
+        logger.error(f"Video cut error: {e}")
         raise e
 
 # ============ PUBLISH PACK ============
 async def publish_pack(pack_name, user_id, context):
-    """Publish the pack"""
+    """Publish the pack - First sticker MUST be static sticker"""
     pack = get_pack(pack_name)
     if not pack or pack['creator'] != user_id:
         return False, "Pack not found!"
@@ -229,16 +198,31 @@ async def publish_pack(pack_name, user_id, context):
         return False, "Add at least 1 item!"
     
     try:
-        # Get first item - must be PNG
+        # Get first item - MUST be static sticker (PNG)
         first_item = items[0]
         first_file_id = first_item.get('file_id')
         first_sticker_type = first_item.get('sticker_type', 'png_sticker')
         
-        # If first item is video, extract first frame as PNG
+        # If first item is video, we need a static sticker first
         if first_sticker_type == 'webm_sticker':
+            # Extract first frame as PNG for first sticker
             file_info = await context.bot.get_file(first_file_id)
             file_content = await file_info.download_as_bytearray()
-            png_content = extract_first_frame_png(file_content)
+            
+            with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as f:
+                f.write(file_content)
+                video_path = f.name
+            
+            png_path = video_path + '.png'
+            cmd = ['ffmpeg', '-i', video_path, '-vframes', '1', '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2', '-y', png_path]
+            subprocess.run(cmd, capture_output=True, timeout=30)
+            
+            with open(png_path, 'rb') as f:
+                png_content = f.read()
+            
+            os.unlink(video_path)
+            if os.path.exists(png_path):
+                os.unlink(png_path)
             
             png_file = BytesIO(png_content)
             png_file.name = 'sticker.png'
@@ -250,12 +234,13 @@ async def publish_pack(pack_name, user_id, context):
             )
             
             first_file_id = sent_msg.document.file_id
+            first_sticker_type = 'png_sticker'
         
-        # Get file content for first sticker (PNG)
+        # Get file content for first sticker
         file_info = await context.bot.get_file(first_file_id)
         file_content = await file_info.download_as_bytearray()
         
-        # Create pack with PNG as first sticker
+        # Create pack with static sticker as first
         api_url = f"https://api.telegram.org/bot{TOKEN}/createNewStickerSet"
         data = {
             'user_id': str(user_id),
@@ -361,7 +346,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "2️⃣ Select it from 'My Packs'\n"
             "3️⃣ Send photo/video/sticker\n"
             "4️⃣ Auto-publishes!\n\n"
-            "✅ No /done needed!",
+            "✅ Video auto-cut to 3 seconds!",
             reply_markup=main_menu()
         )
     
@@ -584,22 +569,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if message.photo:
             file_id = message.photo[-1].file_id
             media_type = 'photo'
+            # Photo - directly use as PNG sticker
             file_info = await context.bot.get_file(file_id)
             file_content = await file_info.download_as_bytearray()
-            processed_content = process_photo_to_png(file_content)
+            
+            # Just resize to 512x512, keep as PNG
+            image = Image.open(BytesIO(file_content))
+            if image.mode in ('RGBA', 'LA', 'P'):
+                image = image.convert('RGB')
+            image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
+            output = BytesIO()
+            image.save(output, format='PNG', optimize=True)
+            processed_content = output.getvalue()
             sticker_type = 'png_sticker'
             
         elif message.video:
             file_id = message.video.file_id
             media_type = 'video'
+            # Video - ONLY cut to 3 seconds, NO CONVERSION
             file_info = await context.bot.get_file(file_id)
             file_content = await file_info.download_as_bytearray()
-            processed_content = process_video_to_webm(file_content)
+            
+            # Cut video to 3 seconds
+            processed_content = cut_video_to_3sec(file_content)
             sticker_type = 'webm_sticker'
             
         elif message.sticker:
             file_id = message.sticker.file_id
             media_type = 'sticker'
+            # Sticker - use as-is
             file_info = await context.bot.get_file(file_id)
             file_content = await file_info.download_as_bytearray()
             
@@ -688,8 +686,9 @@ def main():
         print(f"🤖 Bot: {BOT_USERNAME}")
         print(f"✅ FFmpeg: {'Available' if FFMPEG_AVAILABLE else 'Not available'}")
         print("="*60 + "\n")
-        print("✅ Pack Selection: ON")
-        print("✅ Auto-add to selected pack")
+        print("✅ Video → 3 sec cut (NO CONVERSION)")
+        print("✅ Photo → Static sticker")
+        print("✅ Sticker → Same format")
         print("✅ Auto-publish: ON")
         print("="*60 + "\n")
         
