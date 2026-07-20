@@ -29,6 +29,20 @@ if not TOKEN or len(TOKEN) < 30:
 
 logger.info(f"✅ Bot token loaded: {TOKEN[:10]}...")
 
+# Check FFmpeg
+def check_ffmpeg():
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True)
+        return True
+    except:
+        return False
+
+FFMPEG_AVAILABLE = check_ffmpeg()
+if FFMPEG_AVAILABLE:
+    logger.info("✅ FFmpeg available")
+else:
+    logger.warning("⚠️ FFmpeg not found! Video stickers may not work.")
+
 # ============ DATABASE ============
 DATABASE = 'packs.db'
 TEMP_DIR = 'temp'
@@ -103,25 +117,43 @@ def remove_user_pack(user_id, pack_name):
 init_db()
 
 # ============ MEDIA PROCESSOR ============
-def process_video_to_webm(file_content, max_duration=3):
-    """Convert video to WEBM format for video stickers"""
+def process_video_to_webm(file_content, duration=None):
+    """Convert video to WEBM format - preserves quality, no resize if not needed"""
     try:
+        if not FFMPEG_AVAILABLE:
+            raise Exception("FFmpeg not installed! Please install FFmpeg.")
+        
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as input_file:
             input_file.write(file_content)
             input_path = input_file.name
         
         output_path = input_path + '.webm'
         
-        # Get video duration
-        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', input_path]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        duration = float(result.stdout.strip()) if result.stdout else 0
+        # Get video duration if not provided
+        if duration is None:
+            try:
+                cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
+                       '-of', 'default=noprint_wrappers=1:nokey=1', input_path]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                duration = float(result.stdout.strip()) if result.stdout else 5
+            except:
+                duration = 5
         
-        # Trim if needed
-        if duration > max_duration:
-            trim_cmd = ['ffmpeg', '-i', input_path, '-t', str(max_duration), '-c', 'copy', output_path]
+        # If duration > 5 seconds, trim to 5 seconds (Telegram limit)
+        if duration > 5:
+            trim_cmd = [
+                'ffmpeg', '-i', input_path,
+                '-t', '5',
+                '-c:v', 'libvpx-vp9',
+                '-b:v', '0',
+                '-crf', '30',
+                '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2',
+                '-an',
+                '-y',
+                output_path
+            ]
         else:
-            # Convert to WEBM with VP9 codec
+            # Keep original, just convert to WEBM
             trim_cmd = [
                 'ffmpeg', '-i', input_path,
                 '-c:v', 'libvpx-vp9',
@@ -129,12 +161,28 @@ def process_video_to_webm(file_content, max_duration=3):
                 '-crf', '30',
                 '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2',
                 '-an',
+                '-y',
                 output_path
             ]
         
-        subprocess.run(trim_cmd, capture_output=True)
+        result = subprocess.run(trim_cmd, capture_output=True, timeout=120)
         
-        # If conversion failed or file too large, try with lower quality
+        if result.returncode != 0:
+            logger.error(f"FFmpeg error: {result.stderr.decode()}")
+            # Try with simpler settings
+            simple_cmd = [
+                'ffmpeg', '-i', input_path,
+                '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2',
+                '-c:v', 'libvpx',
+                '-crf', '30',
+                '-b:v', '1M',
+                '-an',
+                '-y',
+                output_path
+            ]
+            subprocess.run(simple_cmd, capture_output=True, timeout=120)
+        
+        # Read output
         with open(output_path, 'rb') as f:
             webm_content = f.read()
         
@@ -145,22 +193,52 @@ def process_video_to_webm(file_content, max_duration=3):
         
         return webm_content
         
+    except subprocess.TimeoutExpired:
+        raise Exception("Video processing timeout (took too long)")
     except Exception as e:
         logger.error(f"Video processing error: {e}")
         raise e
 
-def process_image_to_png(file_content):
-    """Convert image to PNG format for static stickers"""
+def process_photo_to_png(file_content):
+    """Convert photo to PNG - keeps quality, resizes to 512x512"""
     try:
         image = Image.open(BytesIO(file_content))
+        # Convert to RGB if needed
         if image.mode in ('RGBA', 'LA', 'P'):
             image = image.convert('RGB')
+        # Resize to 512x512 (Telegram sticker requirement)
         image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
         output = BytesIO()
-        image.save(output, format='PNG')
+        image.save(output, format='PNG', optimize=True)
         return output.getvalue()
     except Exception as e:
-        logger.error(f"Image processing error: {e}")
+        logger.error(f"Photo processing error: {e}")
+        raise e
+
+def process_sticker(file_content, is_video=False):
+    """Process sticker - keep as-is, only convert if needed"""
+    try:
+        if is_video:
+            # Video sticker - keep as WEBM
+            return file_content, 'webm_sticker'
+        else:
+            # Static sticker - convert to PNG if needed
+            try:
+                image = Image.open(BytesIO(file_content))
+                if image.format == 'PNG':
+                    return file_content, 'png_sticker'
+                else:
+                    # Convert to PNG
+                    if image.mode in ('RGBA', 'LA', 'P'):
+                        image = image.convert('RGB')
+                    image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
+                    output = BytesIO()
+                    image.save(output, format='PNG', optimize=True)
+                    return output.getvalue(), 'png_sticker'
+            except:
+                return file_content, 'png_sticker'
+    except Exception as e:
+        logger.error(f"Sticker processing error: {e}")
         raise e
 
 # ============ USER STATES ============
@@ -181,9 +259,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"""👋 **Welcome to Sticker Pack Bot!**
 
 ✅ **Supports:**
-🎬 Video → Video Sticker (WEBM) - Auto trim to 3 sec
-📸 Photo → Static Sticker (PNG)
-🏷️ Sticker → Same format
+🎬 Video → Video Sticker (WEBM) - Auto trim to 5 sec
+📸 Photo → Static Sticker (PNG - 512x512)
+🏷️ Sticker → Same format (no change)
 
 📌 **Pack name must end with:** `_by_{bot_username}`
 
@@ -224,13 +302,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1️⃣ Click 'Create Sticker Pack'\n"
             "2️⃣ Send pack name (must end with _by_botusername)\n"
             "3️⃣ Send **photo**, **video**, or **sticker**\n"
-            "4️⃣ Bot auto-processes:\n"
-            "   - Video → Video Sticker (WEBM)\n"
-            "   - Photo → Static Sticker (PNG)\n"
+            "4️⃣ Bot processes:\n"
+            "   - Video → Video Sticker (WEBM, max 5 sec)\n"
+            "   - Photo → Static Sticker (PNG, 512x512)\n"
             "   - Sticker → Same format\n"
             "5️⃣ Type /done when finished\n"
             "6️⃣ Click 'Publish Pack'\n\n"
-            "✅ All media processed and added!",
+            "✅ All media preserved as-is!",
             reply_markup=main_menu()
         )
     
@@ -284,6 +362,10 @@ async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id,
     items = pack.get('items', [])
     published = pack.get('published', False)
     
+    # Count sticker types
+    video_count = sum(1 for i in items if i.get('sticker_type') == 'webm_sticker')
+    photo_count = len(items) - video_count
+    
     keyboard = []
     if not published:
         keyboard.append([InlineKeyboardButton("📤 Add Media", callback_data=f'add_to_pack_{pack_name}')])
@@ -299,9 +381,9 @@ async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id,
     await query.edit_message_text(
         f"📦 **{pack_name}**\n\n"
         f"Status: {status}\n"
-        f"Items: {len(items)}\n\n"
-        f"🎬 Video → Video Sticker (WEBM)\n"
-        f"📸 Photo → Static Sticker (PNG)",
+        f"Total Items: {len(items)}\n"
+        f"🎬 Video Stickers: {video_count}\n"
+        f"📸 Static Stickers: {photo_count}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -359,7 +441,6 @@ async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
         file_info = await context.bot.get_file(file_id)
         file_content = await file_info.download_as_bytearray()
         
-        # Determine sticker type
         sticker_type = first_item.get('sticker_type', 'png_sticker')
         
         api_url = f"https://api.telegram.org/bot{TOKEN}/createNewStickerSet"
@@ -447,9 +528,9 @@ async def add_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
     
     await query.edit_message_text(
         f"📤 **Send Photo, Video, or Sticker**\n\n"
-        f"✅ Video → Video Sticker (WEBM) - Auto trim to 3 sec\n"
+        f"✅ Video → Video Sticker (WEBM) - Auto trim to 5 sec\n"
         f"✅ Photo → Static Sticker (PNG) - 512x512\n"
-        f"✅ Sticker → Same format\n\n"
+        f"✅ Sticker → Same format (no change)\n\n"
         f"Type /done when finished.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]])
@@ -493,7 +574,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(
             f"✅ Pack '{pack_name}' created!\n\n"
             "📤 Send **photo**, **video**, or **sticker**\n"
-            "Bot will auto-process!\n"
+            "Bot will process and add!\n"
             "Type /done when finished.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')]])
         )
@@ -513,6 +594,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = None
         sticker_type = 'png_sticker'
         media_type = 'unknown'
+        processed_content = None
         
         try:
             if message.photo:
@@ -521,21 +603,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("🔄 Processing photo to PNG...")
                 file_info = await context.bot.get_file(file_id)
                 file_content = await file_info.download_as_bytearray()
-                processed_content = process_image_to_png(file_content)
+                processed_content = process_photo_to_png(file_content)
                 sticker_type = 'png_sticker'
                 
             elif message.video:
                 file_id = message.video.file_id
                 media_type = 'video'
                 duration = message.video.duration if message.video.duration else 0
-                if duration > 3:
-                    await message.reply_text(f"🔄 Video is {duration}s, trimming to 3 seconds...")
+                
+                if duration > 5:
+                    await message.reply_text(f"🔄 Video is {duration}s, trimming to 5 seconds...")
                 else:
                     await message.reply_text("🔄 Processing video to WEBM...")
                 
                 file_info = await context.bot.get_file(file_id)
                 file_content = await file_info.download_as_bytearray()
-                processed_content = process_video_to_webm(file_content, max_duration=3)
+                processed_content = process_video_to_webm(file_content, duration)
                 sticker_type = 'webm_sticker'
                 
             elif message.sticker:
@@ -546,14 +629,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_content = await file_info.download_as_bytearray()
                 
                 if message.sticker.is_video:
-                    sticker_type = 'webm_sticker'
+                    # Video sticker - keep as is
                     processed_content = file_content
+                    sticker_type = 'webm_sticker'
                 else:
-                    sticker_type = 'png_sticker'
-                    processed_content = process_image_to_png(file_content)
+                    # Static sticker - convert to PNG if needed
+                    processed_content, sticker_type = process_sticker(file_content, False)
             
             else:
                 await message.reply_text("❌ Send Photo, Video, or Sticker!")
+                return
+            
+            if processed_content is None:
+                await message.reply_text("❌ Failed to process media!")
                 return
             
             # Upload processed file to Telegram
@@ -570,12 +658,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"✅ Processed {media_type} → {file_name}"
             )
             
-            # Get the file_id
             processed_file_id = sent_msg.document.file_id
             
-            # Add to pack
             items = pack.get('items', [])
-            items.append({'type': 'processed', 'file_id': processed_file_id, 'sticker_type': sticker_type})
+            items.append({
+                'type': 'processed', 
+                'file_id': processed_file_id, 
+                'sticker_type': sticker_type,
+                'original_type': media_type
+            })
             pack['items'] = items
             save_pack(pack_name, pack)
             
@@ -640,9 +731,14 @@ def main():
         print(f"📊 Database: {DATABASE}")
         print("="*50 + "\n")
         print("✅ Features:")
-        print("   🎬 Video → Video Sticker (WEBM, auto trim to 3 sec)")
+        print("   🎬 Video → Video Sticker (WEBM, max 5 sec)")
         print("   📸 Photo → Static Sticker (PNG, 512x512)")
-        print("   🏷️ Sticker → Same format")
+        print("   🏷️ Sticker → Same format (preserved)")
+        
+        if FFMPEG_AVAILABLE:
+            print("   ✅ FFmpeg: Installed")
+        else:
+            print("   ⚠️ FFmpeg: Not installed (video stickers limited)")
         print("="*50 + "\n")
         
         application = Application.builder().token(TOKEN).build()
