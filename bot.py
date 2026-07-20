@@ -6,6 +6,7 @@ import sqlite3
 import requests
 import subprocess
 import tempfile
+import re
 from datetime import datetime
 from io import BytesIO
 from PIL import Image, ImageOps
@@ -47,6 +48,8 @@ def init_db():
                   published INTEGER, link TEXT, created TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS user_packs
                  (user_id TEXT, pack_name TEXT, PRIMARY KEY (user_id, pack_name))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS selected_pack
+                 (user_id TEXT PRIMARY KEY, pack_name TEXT)''')
     conn.commit()
     conn.close()
 
@@ -105,11 +108,33 @@ def remove_user_pack(user_id, pack_name):
     conn.commit()
     conn.close()
 
+def get_selected_pack(user_id):
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT pack_name FROM selected_pack WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def set_selected_pack(user_id, pack_name):
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO selected_pack (user_id, pack_name) VALUES (?, ?)", (user_id, pack_name))
+    conn.commit()
+    conn.close()
+
+def clear_selected_pack(user_id):
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("DELETE FROM selected_pack WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
 init_db()
 
-# ============ VIDEO PROCESSOR - 3 SECOND WEBM ============
+# ============ VIDEO PROCESSOR ============
 def process_video_to_webm(file_content):
-    """Convert video to WEBM - exactly 3 seconds, animated"""
+    """Convert video to WEBM - exactly 3 seconds"""
     try:
         if not FFMPEG_AVAILABLE:
             raise Exception("FFmpeg not installed!")
@@ -120,7 +145,6 @@ def process_video_to_webm(file_content):
         
         output_path = input_path + '.webm'
         
-        # Convert to WEBM - animated video sticker
         cmd = [
             'ffmpeg', '-i', input_path,
             '-t', '3',
@@ -153,7 +177,7 @@ def process_video_to_webm(file_content):
         raise e
 
 def extract_first_frame_png(file_content):
-    """Extract first frame from video as PNG (for first sticker)"""
+    """Extract first frame from video as PNG"""
     try:
         if not FFMPEG_AVAILABLE:
             raise Exception("FFmpeg not installed!")
@@ -195,7 +219,7 @@ def process_photo_to_png(file_content):
 
 # ============ PUBLISH PACK ============
 async def publish_pack(pack_name, user_id, context):
-    """Publish the pack - First sticker MUST be PNG"""
+    """Publish the pack"""
     pack = get_pack(pack_name)
     if not pack or pack['creator'] != user_id:
         return False, "Pack not found!"
@@ -205,7 +229,7 @@ async def publish_pack(pack_name, user_id, context):
         return False, "Add at least 1 item!"
     
     try:
-        # Get first item
+        # Get first item - must be PNG
         first_item = items[0]
         first_file_id = first_item.get('file_id')
         first_sticker_type = first_item.get('sticker_type', 'png_sticker')
@@ -216,7 +240,6 @@ async def publish_pack(pack_name, user_id, context):
             file_content = await file_info.download_as_bytearray()
             png_content = extract_first_frame_png(file_content)
             
-            # Upload PNG to get file_id
             png_file = BytesIO(png_content)
             png_file.name = 'sticker.png'
             
@@ -254,9 +277,8 @@ async def publish_pack(pack_name, user_id, context):
             else:
                 return False, f"Error: {error}"
         
-        # Add remaining items as video stickers
+        # Add remaining items
         for i, item in enumerate(items):
-            # Skip first item
             if i == 0:
                 continue
             
@@ -269,7 +291,6 @@ async def publish_pack(pack_name, user_id, context):
             add_data = {'user_id': str(user_id), 'name': pack_name, 'emojis': '😀'}
             
             if sticker_type == 'webm_sticker':
-                # Video sticker - animated!
                 add_files = {'video_sticker': ('sticker.webm', BytesIO(file_content), 'video/webm')}
             else:
                 add_files = {'png_sticker': ('sticker.png', BytesIO(file_content), 'image/png')}
@@ -290,7 +311,7 @@ user_data = {}
 
 def main_menu():
     keyboard = [
-        [InlineKeyboardButton("📦 Create Sticker Pack", callback_data='create_pack')],
+        [InlineKeyboardButton("📦 Create New Pack", callback_data='create_pack')],
         [InlineKeyboardButton("📋 My Packs", callback_data='my_packs')],
         [InlineKeyboardButton("ℹ️ Help", callback_data='help')]
     ]
@@ -300,11 +321,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = context.bot.username
     msg = f"""👋 **Welcome to Sticker Pack Bot!**
 
-✅ Video → 3 sec Animated Video Sticker
+✅ Video → 3 sec Video Sticker
 ✅ Photo → Static Sticker
 ✅ Sticker → Same format
 
-📌 Just send a name - Bot adds `_by_{bot_username}` automatically"""
+📌 Create a pack, select it, and send media!
+Bot adds `_by_{bot_username}` automatically"""
 
     if update.callback_query:
         query = update.callback_query
@@ -320,7 +342,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == 'create_pack':
         await query.edit_message_text(
-            f"📦 **Send your pack name**\n\nExample: `my_pack`\n\nBot adds `_by_botusername` automatically",
+            f"📦 **Send your pack name**\n\n"
+            f"Only letters, numbers, underscores\n"
+            f"Example: `my_pack`\n\n"
+            f"Bot adds `_by_botusername` automatically",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data='back_to_menu')]])
         )
@@ -332,11 +357,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'help':
         await query.edit_message_text(
             "📖 **How to use:**\n\n"
-            "1️⃣ Click 'Create Sticker Pack'\n"
-            "2️⃣ Send any name\n"
-            "3️⃣ Send video (auto 3 sec cut)\n"
-            "4️⃣ Pack auto-publishes!\n\n"
-            "✅ Video stickers are animated!",
+            "1️⃣ Create a pack\n"
+            "2️⃣ Select it from 'My Packs'\n"
+            "3️⃣ Send photo/video/sticker\n"
+            "4️⃣ Auto-publishes!\n\n"
+            "✅ No /done needed!",
             reply_markup=main_menu()
         )
     
@@ -354,13 +379,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith('get_link_'):
         pack_name = query.data.replace('get_link_', '')
         await get_pack_link(update, context, user_id, pack_name)
+    
+    elif query.data.startswith('select_pack_'):
+        pack_name = query.data.replace('select_pack_', '')
+        set_selected_pack(user_id, pack_name)
+        await query.edit_message_text(
+            f"✅ **Selected: {pack_name}**\n\n"
+            f"Now send any **photo**, **video**, or **sticker**\n"
+            f"It will be added to this pack!",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')],
+                [InlineKeyboardButton("🔙 Back", callback_data='my_packs')]
+            ])
+        )
 
 async def show_my_packs(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
     query = update.callback_query
     packs = get_user_packs(user_id)
+    selected = get_selected_pack(user_id)
     
     if not packs:
-        await query.edit_message_text("📭 No packs!", reply_markup=main_menu())
+        await query.edit_message_text("📭 No packs! Create one first.", reply_markup=main_menu())
         return
     
     keyboard = []
@@ -368,10 +408,23 @@ async def show_my_packs(update: Update, context: ContextTypes.DEFAULT_TYPE, user
         pack_data = get_pack(pack)
         if pack_data:
             status = "✅" if pack_data.get('published') else "⏳"
-            keyboard.append([InlineKeyboardButton(f"{status} {pack}", callback_data=f'view_pack_{pack}')])
+            selected_mark = "⭐ " if pack == selected else ""
+            keyboard.append([
+                InlineKeyboardButton(f"{selected_mark}{status} {pack}", callback_data=f'view_pack_{pack}')
+            ])
+            if pack != selected:
+                keyboard.append([
+                    InlineKeyboardButton(f"📌 Select {pack}", callback_data=f'select_pack_{pack}')
+                ])
+    
+    if selected:
+        keyboard.append([InlineKeyboardButton(f"📍 Currently selected: {selected}", callback_data='dummy')])
     
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data='back_to_menu')])
-    await query.edit_message_text("📋 Your Packs:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(
+        f"📋 **Your Packs:**\n\n⭐ = Selected (media will add here)\n✅ = Published | ⏳ = Draft",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
     query = update.callback_query
@@ -383,6 +436,7 @@ async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id,
     
     items = pack.get('items', [])
     published = pack.get('published', False)
+    selected = get_selected_pack(user_id)
     
     keyboard = []
     if not published:
@@ -390,12 +444,20 @@ async def view_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id,
     else:
         keyboard.append([InlineKeyboardButton("🔗 Get Link", callback_data=f'get_link_{pack_name}')])
     
+    if pack_name != selected:
+        keyboard.append([InlineKeyboardButton("⭐ Select This Pack", callback_data=f'select_pack_{pack_name}')])
+    else:
+        keyboard.append([InlineKeyboardButton("📍 Currently Selected", callback_data='dummy')])
+    
     keyboard.append([InlineKeyboardButton("🗑️ Delete", callback_data=f'delete_pack_{pack_name}')])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data='my_packs')])
     
     status = "✅ Published" if published else "⏳ Draft"
     await query.edit_message_text(
-        f"📦 **{pack_name}**\n\nStatus: {status}\nItems: {len(items)}",
+        f"📦 **{pack_name}**\n\n"
+        f"Status: {status}\n"
+        f"Items: {len(items)}\n\n"
+        f"⭐ Select this pack to auto-add media!",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -428,23 +490,21 @@ async def delete_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
     
     delete_pack_db(pack_name)
     remove_user_pack(user_id, pack_name)
+    selected = get_selected_pack(user_id)
+    if selected == pack_name:
+        clear_selected_pack(user_id)
     await query.edit_message_text("✅ Deleted!", reply_markup=main_menu())
 
-# ============ ADD TO PACK ============
 async def add_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
     query = update.callback_query
     
-    if user_id not in user_data:
-        user_data[user_id] = {}
-    user_data[user_id]['current_pack'] = pack_name
+    set_selected_pack(user_id, pack_name)
     user_steps[user_id] = 'waiting_for_media'
     
     await query.edit_message_text(
-        f"📤 **Send Photo, Video, or Sticker**\n\n"
-        f"✅ Video → 3 sec Animated Video Sticker\n"
-        f"✅ Photo → Static Sticker\n"
-        f"✅ Sticker → Same format\n\n"
-        f"Pack auto-publishes after adding!",
+        f"📤 **Pack selected: {pack_name}**\n\n"
+        f"Now send any **photo**, **video**, or **sticker**\n"
+        f"It will be added automatically!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f'view_pack_{pack_name}')]])
     )
@@ -458,9 +518,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pack_name = message.text.strip().replace(' ', '_')
         bot_username = context.bot.username
         
+        # Clean pack name - only letters, numbers, underscore
+        pack_name = re.sub(r'[^a-zA-Z0-9_]', '', pack_name)
+        
+        if not pack_name:
+            await message.reply_text("❌ Invalid name! Use letters, numbers, underscores only.")
+            return
+        
+        if not pack_name[0].isalpha():
+            await message.reply_text("❌ Name must start with a letter!")
+            return
+        
         if not pack_name.endswith(f"_by_{bot_username}"):
             pack_name = f"{pack_name}_by_{bot_username}"
-        pack_name = pack_name.replace('__', '_')
         
         if get_pack(pack_name):
             await message.reply_text("❌ Name already taken!")
@@ -471,134 +541,134 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'created': datetime.now().isoformat()}
         save_pack(pack_name, data)
         add_user_pack(user_id, pack_name)
+        set_selected_pack(user_id, pack_name)
         
         user_data[user_id] = {'current_pack': pack_name}
         user_steps[user_id] = 'waiting_for_media'
         
         await message.reply_text(
-            f"✅ **Pack created!**\n\n"
-            f"📤 Send **photo**, **video**, or **sticker**\n"
-            f"Pack will auto-publish!",
+            f"✅ **Pack '{pack_name}' created!**\n\n"
+            f"⭐ Selected automatically!\n"
+            f"Now send **photo**, **video**, or **sticker**\n"
+            f"It will be added and published!",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')]])
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 View Pack", callback_data=f'view_pack_{pack_name}')],
+                [InlineKeyboardButton("📦 Open Pack", url=f"https://t.me/addstickers/{pack_name}")]
+            ])
         )
         return
     
-    if user_id in user_steps and user_steps[user_id] == 'waiting_for_media':
-        pack_name = user_data.get(user_id, {}).get('current_pack')
-        if not pack_name:
-            await message.reply_text("❌ No pack found!")
-            return
-        
-        pack = get_pack(pack_name)
-        if not pack:
-            await message.reply_text("❌ Pack not found!")
-            return
-        
-        file_id = None
-        sticker_type = 'png_sticker'
-        media_type = 'unknown'
-        processed_content = None
-        
-        try:
-            if message.photo:
-                file_id = message.photo[-1].file_id
-                media_type = 'photo'
-                file_info = await context.bot.get_file(file_id)
-                file_content = await file_info.download_as_bytearray()
-                processed_content = process_photo_to_png(file_content)
-                sticker_type = 'png_sticker'
-                
-            elif message.video:
-                file_id = message.video.file_id
-                media_type = 'video'
-                file_info = await context.bot.get_file(file_id)
-                file_content = await file_info.download_as_bytearray()
-                processed_content = process_video_to_webm(file_content)
-                sticker_type = 'webm_sticker'
-                
-            elif message.sticker:
-                file_id = message.sticker.file_id
-                media_type = 'sticker'
-                file_info = await context.bot.get_file(file_id)
-                file_content = await file_info.download_as_bytearray()
-                
-                if message.sticker.is_video:
-                    processed_content = file_content
-                    sticker_type = 'webm_sticker'
-                else:
-                    processed_content = file_content
-                    sticker_type = 'png_sticker'
-            
-            else:
-                await message.reply_text("❌ Send Photo, Video, or Sticker!")
-                return
-            
-            if processed_content is None:
-                await message.reply_text("❌ Failed to process!")
-                return
-            
-            # Upload to Telegram
-            if sticker_type == 'webm_sticker':
-                file_name = 'sticker.webm'
-            else:
-                file_name = 'sticker.png'
-            
-            processed_file = BytesIO(processed_content)
-            processed_file.name = file_name
-            
-            sent_msg = await message.reply_document(
-                document=processed_file,
-                filename=file_name,
-                caption=f"✅ Added to {pack_name}!"
-            )
-            
-            processed_file_id = sent_msg.document.file_id
-            
-            items = pack.get('items', [])
-            items.append({
-                'type': 'processed',
-                'file_id': processed_file_id,
-                'sticker_type': sticker_type,
-                'original_type': media_type
-            })
-            pack['items'] = items
-            save_pack(pack_name, pack)
-            
-            # Auto publish immediately
-            await message.reply_text("⏳ Publishing...")
-            success, msg_result = await publish_pack(pack_name, user_id, context)
-            
-            if success:
-                pack_link = f"https://t.me/addstickers/{pack_name}"
-                pack_display = pack_name.replace('_by_', ' :: @')
-                
-                await message.reply_text(
-                    f"✅ **Added to {pack_display}**\n\n"
-                    f"You can send emoji for this sticker\n\n"
-                    f"📦 **{pack_display}**",
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"📦 {pack_display}", url=pack_link)],
-                        [InlineKeyboardButton("📋 My Packs", callback_data='my_packs')]
-                    ])
-                )
-                
-                # Clear user state
-                if user_id in user_data:
-                    del user_data[user_id]
-                if user_id in user_steps:
-                    del user_steps[user_id]
-            else:
-                await message.reply_text(f"❌ {msg_result}")
-            
-        except Exception as e:
-            logger.error(f"Error: {e}")
-            await message.reply_text(f"❌ Error: {str(e)}")
-        
+    # Check if user has a selected pack
+    selected_pack = get_selected_pack(user_id)
+    
+    if not selected_pack:
+        await message.reply_text(
+            "❌ No pack selected!\n\n"
+            "Create a pack or select one from 'My Packs'",
+            reply_markup=main_menu()
+        )
         return
     
-    await message.reply_text("Use /start", reply_markup=main_menu())
+    pack = get_pack(selected_pack)
+    if not pack or pack['creator'] != user_id:
+        await message.reply_text("❌ Pack not found!")
+        return
+    
+    file_id = None
+    sticker_type = 'png_sticker'
+    media_type = 'unknown'
+    processed_content = None
+    
+    try:
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            media_type = 'photo'
+            file_info = await context.bot.get_file(file_id)
+            file_content = await file_info.download_as_bytearray()
+            processed_content = process_photo_to_png(file_content)
+            sticker_type = 'png_sticker'
+            
+        elif message.video:
+            file_id = message.video.file_id
+            media_type = 'video'
+            file_info = await context.bot.get_file(file_id)
+            file_content = await file_info.download_as_bytearray()
+            processed_content = process_video_to_webm(file_content)
+            sticker_type = 'webm_sticker'
+            
+        elif message.sticker:
+            file_id = message.sticker.file_id
+            media_type = 'sticker'
+            file_info = await context.bot.get_file(file_id)
+            file_content = await file_info.download_as_bytearray()
+            
+            if message.sticker.is_video:
+                processed_content = file_content
+                sticker_type = 'webm_sticker'
+            else:
+                processed_content = file_content
+                sticker_type = 'png_sticker'
+        
+        else:
+            await message.reply_text("❌ Send Photo, Video, or Sticker!")
+            return
+        
+        if processed_content is None:
+            await message.reply_text("❌ Failed to process!")
+            return
+        
+        # Upload to Telegram
+        if sticker_type == 'webm_sticker':
+            file_name = 'sticker.webm'
+        else:
+            file_name = 'sticker.png'
+        
+        processed_file = BytesIO(processed_content)
+        processed_file.name = file_name
+        
+        sent_msg = await message.reply_document(
+            document=processed_file,
+            filename=file_name,
+            caption=f"✅ Added to {selected_pack}!"
+        )
+        
+        processed_file_id = sent_msg.document.file_id
+        
+        items = pack.get('items', [])
+        items.append({
+            'type': 'processed',
+            'file_id': processed_file_id,
+            'sticker_type': sticker_type,
+            'original_type': media_type
+        })
+        pack['items'] = items
+        save_pack(selected_pack, pack)
+        
+        # Auto publish
+        await message.reply_text("⏳ Publishing...")
+        success, msg_result = await publish_pack(selected_pack, user_id, context)
+        
+        if success:
+            pack_link = f"https://t.me/addstickers/{selected_pack}"
+            pack_display = selected_pack.replace('_by_', ' :: @')
+            
+            await message.reply_text(
+                f"✅ **Added to {pack_display}**\n\n"
+                f"You can send emoji for this sticker\n\n"
+                f"📦 **{pack_display}**",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"📦 {pack_display}", url=pack_link)],
+                    [InlineKeyboardButton("📋 My Packs", callback_data='my_packs')]
+                ])
+            )
+        else:
+            await message.reply_text(f"❌ {msg_result}")
+        
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await message.reply_text(f"❌ Error: {str(e)}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -618,9 +688,9 @@ def main():
         print(f"🤖 Bot: {BOT_USERNAME}")
         print(f"✅ FFmpeg: {'Available' if FFMPEG_AVAILABLE else 'Not available'}")
         print("="*60 + "\n")
-        print("✅ Video → Animated Video Sticker (3 sec)")
+        print("✅ Pack Selection: ON")
+        print("✅ Auto-add to selected pack")
         print("✅ Auto-publish: ON")
-        print("✅ No /done needed")
         print("="*60 + "\n")
         
         application = Application.builder().token(TOKEN).build()
