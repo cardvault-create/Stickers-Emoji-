@@ -17,8 +17,9 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 TOKEN = "8799309309:AAEy_csS6ESN8NObQlxHMss5YPmYEGOEtcc"
+BOT_USERNAME = "@AryaStark_Devil_Bot"
 
-if not TOKEN or len(TOKEN) < 30:
+if not TOKEN:
     logger.error("❌ Invalid token!")
     sys.exit(1)
 
@@ -106,9 +107,9 @@ def remove_user_pack(user_id, pack_name):
 
 init_db()
 
-# ============ MEDIA PROCESSORS ============
+# ============ VIDEO PROCESSOR - 3 SECOND CUT ============
 def process_video_to_webm(file_content):
-    """Convert video to WEBM for video sticker"""
+    """Convert video to WEBM - exactly 3 seconds"""
     try:
         if not FFMPEG_AVAILABLE:
             raise Exception("FFmpeg not installed!")
@@ -119,22 +120,10 @@ def process_video_to_webm(file_content):
         
         output_path = input_path + '.webm'
         
-        # Get duration
-        try:
-            cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
-                   '-of', 'default=noprint_wrappers=1:nokey=1', input_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            duration = float(result.stdout.strip()) if result.stdout else 3
-        except:
-            duration = 3
-        
-        if duration > 5:
-            duration = 5
-        
-        # Convert to WEBM
+        # Always take first 3 seconds
         cmd = [
             'ffmpeg', '-i', input_path,
-            '-t', str(duration),
+            '-t', '3',
             '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2,fps=30',
             '-c:v', 'libvpx-vp9',
             '-b:v', '0',
@@ -191,10 +180,10 @@ def main_menu():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = context.bot.username
-    msg = f"""👋 **Welcome!**
+    msg = f"""👋 **Welcome to Sticker Pack Bot!**
 
-✅ Video → Video Sticker (WEBM, max 5 sec)
-✅ Photo → Static Sticker (PNG)
+✅ Video → 3 sec Video Sticker
+✅ Photo → Static Sticker
 ✅ Sticker → Same format
 
 📌 Just send a name - Bot adds `_by_{bot_username}`"""
@@ -420,8 +409,8 @@ async def add_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
     
     await query.edit_message_text(
         f"📤 **Send Photo, Video, or Sticker**\n\n"
-        f"✅ Video → Video Sticker (WEBM)\n"
-        f"✅ Photo → Static Sticker (PNG)\n"
+        f"✅ Video → 3 sec Video Sticker\n"
+        f"✅ Photo → Static Sticker\n"
         f"✅ Sticker → Same format\n\n"
         f"Type /done when finished.",
         parse_mode=ParseMode.MARKDOWN,
@@ -497,7 +486,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_id = message.video.file_id
                 media_type = 'video'
                 duration = message.video.duration if message.video.duration else 0
-                await message.reply_text(f"🔄 Processing video ({duration}s)...")
+                await message.reply_text(f"🔄 Processing video ({duration}s) → 3 sec...")
                 file_info = await context.bot.get_file(file_id)
                 file_content = await file_info.download_as_bytearray()
                 processed_content = process_video_to_webm(file_content)
@@ -553,12 +542,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_pack(pack_name, pack)
             
             pack_link = f"https://t.me/addstickers/{pack_name}"
+            pack_button = InlineKeyboardButton("📦 Open Pack", url=pack_link)
+            
             await message.reply_text(
-                f"✅ **Added!** ({len(items)} total)\n\n"
+                f"✅ **Added to {pack_name}**\n\n"
                 f"📦 Pack: `{pack_name}`\n"
                 f"🔗 Link: `{pack_link}`\n\n"
                 f"Send more or type /done",
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[pack_button]])
             )
             
         except Exception as e:
@@ -615,6 +607,7 @@ def main():
         print("🤖 Sticker Pack Bot Starting...")
         print("="*60)
         print(f"🔑 Token: {TOKEN[:10]}...")
+        print(f"🤖 Bot: {BOT_USERNAME}")
         print(f"✅ FFmpeg: {'Available' if FFMPEG_AVAILABLE else 'Not available'}")
         print("="*60 + "\n")
         
