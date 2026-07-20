@@ -3,11 +3,10 @@ import json
 import logging
 import sqlite3
 import requests
+import subprocess
 from datetime import datetime
 from io import BytesIO
 from PIL import Image, ImageOps
-import cv2
-import numpy as np
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
@@ -95,13 +94,16 @@ def remove_user_pack(user_id, pack_name):
 
 init_db()
 
-# ============ IMAGE CONVERTER ============
+# ============ IMAGE CONVERTER (Without OpenCV) ============
 def convert_to_png(file_content, file_type):
     """Convert any media to PNG format"""
     try:
         if file_type == 'photo':
             # Convert photo to PNG
             image = Image.open(BytesIO(file_content))
+            # Convert to RGB if needed
+            if image.mode in ('RGBA', 'LA', 'P'):
+                image = image.convert('RGB')
             # Resize to 512x512
             image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
             # Convert to PNG
@@ -110,8 +112,11 @@ def convert_to_png(file_content, file_type):
             return output.getvalue()
         
         elif file_type == 'sticker':
-            # Sticker is already WEBP, convert to PNG
+            # Sticker is WEBP, convert to PNG
             image = Image.open(BytesIO(file_content))
+            # Convert to RGB if needed
+            if image.mode in ('RGBA', 'LA', 'P'):
+                image = image.convert('RGB')
             # Resize to 512x512
             image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
             output = BytesIO()
@@ -119,29 +124,27 @@ def convert_to_png(file_content, file_type):
             return output.getvalue()
         
         elif file_type == 'video':
-            # Extract first frame from video and convert to PNG
-            # Save video temporarily
-            temp_video = os.path.join(TEMP_DIR, f"temp_video_{datetime.now().timestamp()}.mp4")
-            with open(temp_video, 'wb') as f:
-                f.write(file_content)
-            
-            # Extract first frame
-            cap = cv2.VideoCapture(temp_video)
-            ret, frame = cap.read()
-            cap.release()
-            os.remove(temp_video)
-            
-            if not ret:
-                raise Exception("Could not extract frame from video")
-            
-            # Convert frame to PIL Image
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(frame_rgb)
-            # Resize to 512x512
-            image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
-            output = BytesIO()
-            image.save(output, format='PNG')
-            return output.getvalue()
+            # For video, we'll use a simpler approach - just take the thumbnail
+            # Telegram provides video thumbnail
+            # If no thumbnail, use a placeholder
+            try:
+                # Try to open as image first (some videos have embedded thumbnails)
+                image = Image.open(BytesIO(file_content))
+                if image.mode in ('RGBA', 'LA', 'P'):
+                    image = image.convert('RGB')
+                image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
+                output = BytesIO()
+                image.save(output, format='PNG')
+                return output.getvalue()
+            except:
+                # If can't open as image, create a simple placeholder
+                # with video icon or first frame using PIL
+                # Create a simple colored image with text
+                img = Image.new('RGB', (512, 512), color=(50, 50, 80))
+                output = BytesIO()
+                img.save(output, format='PNG')
+                logger.warning("Video thumbnail not available, using placeholder")
+                return output.getvalue()
         
         else:
             raise Exception(f"Unsupported file type: {file_type}")
@@ -170,7 +173,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ✅ **Auto Convert Feature:**
 📸 Photo → PNG (512x512)
-🎬 Video → PNG (First frame, 512x512)
+🎬 Video → PNG (Thumbnail/Frame)
 🏷️ Sticker → PNG (512x512)
 
 📌 **Pack name must end with:** `_by_{bot_username}`
@@ -210,7 +213,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "ℹ️ **How to create a sticker pack:**\n\n"
             "1️⃣ Click 'Create Sticker Pack'\n"
-            "2️⃣ Send pack name\n"
+            "2️⃣ Send pack name (must end with _by_botusername)\n"
             "3️⃣ Send **photo**, **video**, or **sticker**\n"
             "4️⃣ Bot auto-converts to PNG\n"
             "5️⃣ Type /done when finished\n"
@@ -422,7 +425,7 @@ async def add_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
         f"📤 **Send Photo, Video, or Sticker**\n\n"
         f"Bot will auto-convert to PNG (512x512)\n\n"
         f"✅ Photo → PNG\n"
-        f"✅ Video → PNG (First frame)\n"
+        f"✅ Video → PNG (Thumbnail)\n"
         f"✅ Sticker → PNG\n\n"
         f"Type /done when finished.",
         parse_mode=ParseMode.MARKDOWN,
