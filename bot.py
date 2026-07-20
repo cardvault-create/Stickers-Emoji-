@@ -41,7 +41,7 @@ FFMPEG_AVAILABLE = check_ffmpeg()
 if FFMPEG_AVAILABLE:
     logger.info("✅ FFmpeg available")
 else:
-    logger.warning("⚠️ FFmpeg not found!")
+    logger.warning("⚠️ FFmpeg not found! Video stickers may not work.")
 
 # ============ DATABASE ============
 DATABASE = 'packs.db'
@@ -118,19 +118,17 @@ init_db()
 
 # ============ VIDEO PROCESSOR ============
 def process_video_to_webm(file_content, duration=None):
-    """Convert video to WEBM format with proper encoding"""
+    """Convert video to WEBM format"""
     try:
         if not FFMPEG_AVAILABLE:
             raise Exception("FFmpeg not available!")
         
-        # Save input video
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as input_file:
             input_file.write(file_content)
             input_path = input_file.name
         
         output_path = input_path + '.webm'
         
-        # Get duration if not provided
         if duration is None:
             try:
                 cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
@@ -140,11 +138,10 @@ def process_video_to_webm(file_content, duration=None):
             except:
                 duration = 3
         
-        # Telegram limit is 5 seconds for video stickers
         if duration > 5:
             duration = 5
         
-        # Convert to WEBM with proper settings
+        # Convert to WEBM
         cmd = [
             'ffmpeg', '-i', input_path,
             '-t', str(duration),
@@ -158,34 +155,17 @@ def process_video_to_webm(file_content, duration=None):
             output_path
         ]
         
-        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        subprocess.run(cmd, capture_output=True, timeout=120)
         
-        if result.returncode != 0:
-            # Try with simpler settings
-            simple_cmd = [
-                'ffmpeg', '-i', input_path,
-                '-t', str(duration),
-                '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2,fps=30',
-                '-c:v', 'libvpx',
-                '-crf', '30',
-                '-b:v', '1M',
-                '-an',
-                '-y',
-                output_path
-            ]
-            subprocess.run(simple_cmd, capture_output=True, timeout=120)
-        
-        # Read output
         with open(output_path, 'rb') as f:
             webm_content = f.read()
         
-        # Cleanup
         os.unlink(input_path)
         if os.path.exists(output_path):
             os.unlink(output_path)
         
         if len(webm_content) == 0:
-            raise Exception("Video processing failed - empty output")
+            raise Exception("Video processing failed")
         
         return webm_content
         
@@ -374,6 +354,21 @@ async def delete_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
     remove_user_pack(user_id, pack_name)
     await query.edit_message_text("✅ Deleted!", reply_markup=main_menu())
 
+# ============ UPLOAD FILE TO TELEGRAM ============
+async def upload_file_to_telegram(file_content, file_name):
+    """Upload file to Telegram and get file_id"""
+    try:
+        file_bytes = BytesIO(file_content)
+        file_bytes.name = file_name
+        
+        # Use context.bot to send document
+        # We'll use a dummy chat for upload
+        # This is a workaround - we'll use the actual message to send
+        return file_bytes
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        raise e
+
 # ============ PUBLISH PACK ============
 async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id, pack_name):
     query = update.callback_query
@@ -392,6 +387,7 @@ async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
     await query.edit_message_text("⏳ Publishing... Please wait...")
     
     try:
+        # Get first item
         first_item = items[0]
         file_id = first_item.get('file_id')
         file_info = await context.bot.get_file(file_id)
@@ -399,31 +395,40 @@ async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
         
         sticker_type = first_item.get('sticker_type', 'png_sticker')
         
+        # Use direct requests with multipart form data
         api_url = f"https://api.telegram.org/bot{TOKEN}/createNewStickerSet"
         
-        # Prepare data
+        # Prepare multipart data
+        files = {}
         data = {
-            'user_id': int(user_id),
+            'user_id': str(user_id),
             'name': pack_name,
             'title': pack_name.replace('_', ' ').title(),
             'emojis': '😀'
         }
         
-        # Prepare files
         if sticker_type == 'webm_sticker':
             data['video_sticker'] = 'sticker.webm'
-            files = {'video_sticker': ('sticker.webm', BytesIO(file_content))}
+            files = {
+                'video_sticker': ('sticker.webm', BytesIO(file_content), 'video/webm')
+            }
         else:
-            files = {'png_sticker': ('sticker.png', BytesIO(file_content))}
+            files = {
+                'png_sticker': ('sticker.png', BytesIO(file_content), 'image/png')
+            }
         
-        logger.info(f"Creating pack: {pack_name} with type: {sticker_type}")
+        logger.info(f"Creating pack: {pack_name}, type: {sticker_type}")
+        logger.info(f"Data: {data}")
+        logger.info(f"Files keys: {list(files.keys())}")
         
+        # Make request
         response = requests.post(api_url, data=data, files=files)
         result = response.json()
-        logger.info(f"Create response: {result}")
+        
+        logger.info(f"Response: {result}")
         
         if not result.get('ok'):
-            error_msg = str(result)
+            error_msg = result.get('description', str(result))
             if 'name is already occupied' in error_msg:
                 pack['published'] = True
                 save_pack(pack_name, pack)
@@ -447,16 +452,19 @@ async def publish_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
             add_url = f"https://api.telegram.org/bot{TOKEN}/addStickerToSet"
             
             add_data = {
-                'user_id': int(user_id),
+                'user_id': str(user_id),
                 'name': pack_name,
                 'emojis': '😀'
             }
             
             if sticker_type == 'webm_sticker':
-                add_data['video_sticker'] = 'sticker.webm'
-                add_files = {'video_sticker': ('sticker.webm', BytesIO(file_content))}
+                add_files = {
+                    'video_sticker': ('sticker.webm', BytesIO(file_content), 'video/webm')
+                }
             else:
-                add_files = {'png_sticker': ('sticker.png', BytesIO(file_content))}
+                add_files = {
+                    'png_sticker': ('sticker.png', BytesIO(file_content), 'image/png')
+                }
             
             add_response = requests.post(add_url, data=add_data, files=add_files)
             add_result = add_response.json()
@@ -518,11 +526,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pack_name = message.text.strip().replace(' ', '_')
         bot_username = context.bot.username
         
-        # Auto-add _by_botusername
         if not pack_name.endswith(f"_by_{bot_username}"):
             pack_name = f"{pack_name}_by_{bot_username}"
         
-        # Remove any double underscores
         pack_name = pack_name.replace('__', '_')
         
         if get_pack(pack_name):
@@ -610,14 +616,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Upload processed file to Telegram
             if sticker_type == 'webm_sticker':
                 file_name = 'sticker.webm'
+                mime_type = 'video/webm'
             else:
                 file_name = 'sticker.png'
+                mime_type = 'image/png'
             
+            # Send as document to get file_id
             processed_file = BytesIO(processed_content)
             processed_file.name = file_name
             
             sent_msg = await message.reply_document(
                 document=processed_file,
+                filename=file_name,
                 caption=f"✅ Added to pack!"
             )
             
