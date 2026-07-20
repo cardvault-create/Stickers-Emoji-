@@ -107,9 +107,9 @@ def remove_user_pack(user_id, pack_name):
 
 init_db()
 
-# ============ VIDEO PROCESSOR ============
+# ============ VIDEO PROCESSOR - 3 SECOND WEBM ============
 def process_video_to_webm(file_content):
-    """Convert video to WEBM - exactly 3 seconds silently"""
+    """Convert video to WEBM - exactly 3 seconds, animated"""
     try:
         if not FFMPEG_AVAILABLE:
             raise Exception("FFmpeg not installed!")
@@ -120,7 +120,7 @@ def process_video_to_webm(file_content):
         
         output_path = input_path + '.webm'
         
-        # Silent conversion - no output messages
+        # Convert to WEBM - animated video sticker
         cmd = [
             'ffmpeg', '-i', input_path,
             '-t', '3',
@@ -152,8 +152,35 @@ def process_video_to_webm(file_content):
         logger.error(f"Video error: {e}")
         raise e
 
+def extract_first_frame_png(file_content):
+    """Extract first frame from video as PNG (for first sticker)"""
+    try:
+        if not FFMPEG_AVAILABLE:
+            raise Exception("FFmpeg not installed!")
+        
+        with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as f:
+            f.write(file_content)
+            video_path = f.name
+        
+        png_path = video_path + '.png'
+        cmd = ['ffmpeg', '-i', video_path, '-vframes', '1', '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2', '-y', png_path]
+        subprocess.run(cmd, capture_output=True, timeout=30)
+        
+        with open(png_path, 'rb') as f:
+            png_content = f.read()
+        
+        os.unlink(video_path)
+        if os.path.exists(png_path):
+            os.unlink(png_path)
+        
+        return png_content
+        
+    except Exception as e:
+        logger.error(f"Frame extraction error: {e}")
+        raise e
+
 def process_photo_to_png(file_content):
-    """Convert photo to PNG silently"""
+    """Convert photo to PNG"""
     try:
         image = Image.open(BytesIO(file_content))
         if image.mode in ('RGBA', 'LA', 'P'):
@@ -168,7 +195,7 @@ def process_photo_to_png(file_content):
 
 # ============ PUBLISH PACK ============
 async def publish_pack(pack_name, user_id, context):
-    """Publish the pack"""
+    """Publish the pack - First sticker MUST be PNG"""
     pack = get_pack(pack_name)
     if not pack or pack['creator'] != user_id:
         return False, "Pack not found!"
@@ -178,30 +205,16 @@ async def publish_pack(pack_name, user_id, context):
         return False, "Add at least 1 item!"
     
     try:
-        # Get first item - must be PNG for first sticker
+        # Get first item
         first_item = items[0]
         first_file_id = first_item.get('file_id')
         first_sticker_type = first_item.get('sticker_type', 'png_sticker')
         
-        # If first item is video, convert first frame to PNG
+        # If first item is video, extract first frame as PNG
         if first_sticker_type == 'webm_sticker':
             file_info = await context.bot.get_file(first_file_id)
             file_content = await file_info.download_as_bytearray()
-            
-            with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as f:
-                f.write(file_content)
-                video_path = f.name
-            
-            png_path = video_path + '.png'
-            cmd = ['ffmpeg', '-i', video_path, '-vframes', '1', '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2', '-y', png_path]
-            subprocess.run(cmd, capture_output=True, timeout=30)
-            
-            with open(png_path, 'rb') as f:
-                png_content = f.read()
-            
-            os.unlink(video_path)
-            if os.path.exists(png_path):
-                os.unlink(png_path)
+            png_content = extract_first_frame_png(file_content)
             
             # Upload PNG to get file_id
             png_file = BytesIO(png_content)
@@ -215,7 +228,7 @@ async def publish_pack(pack_name, user_id, context):
             
             first_file_id = sent_msg.document.file_id
         
-        # Get file content for first sticker
+        # Get file content for first sticker (PNG)
         file_info = await context.bot.get_file(first_file_id)
         file_content = await file_info.download_as_bytearray()
         
@@ -241,8 +254,9 @@ async def publish_pack(pack_name, user_id, context):
             else:
                 return False, f"Error: {error}"
         
-        # Add remaining items
+        # Add remaining items as video stickers
         for i, item in enumerate(items):
+            # Skip first item
             if i == 0:
                 continue
             
@@ -255,6 +269,7 @@ async def publish_pack(pack_name, user_id, context):
             add_data = {'user_id': str(user_id), 'name': pack_name, 'emojis': '😀'}
             
             if sticker_type == 'webm_sticker':
+                # Video sticker - animated!
                 add_files = {'video_sticker': ('sticker.webm', BytesIO(file_content), 'video/webm')}
             else:
                 add_files = {'png_sticker': ('sticker.png', BytesIO(file_content), 'image/png')}
@@ -285,7 +300,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = context.bot.username
     msg = f"""👋 **Welcome to Sticker Pack Bot!**
 
-✅ Video → 3 sec Video Sticker
+✅ Video → 3 sec Animated Video Sticker
 ✅ Photo → Static Sticker
 ✅ Sticker → Same format
 
@@ -319,9 +334,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📖 **How to use:**\n\n"
             "1️⃣ Click 'Create Sticker Pack'\n"
             "2️⃣ Send any name\n"
-            "3️⃣ Send photo/video/sticker\n"
+            "3️⃣ Send video (auto 3 sec cut)\n"
             "4️⃣ Pack auto-publishes!\n\n"
-            "✅ No /done needed!",
+            "✅ Video stickers are animated!",
             reply_markup=main_menu()
         )
     
@@ -426,7 +441,7 @@ async def add_to_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, user_i
     
     await query.edit_message_text(
         f"📤 **Send Photo, Video, or Sticker**\n\n"
-        f"✅ Video → 3 sec Video Sticker\n"
+        f"✅ Video → 3 sec Animated Video Sticker\n"
         f"✅ Photo → Static Sticker\n"
         f"✅ Sticker → Same format\n\n"
         f"Pack auto-publishes after adding!",
@@ -603,8 +618,8 @@ def main():
         print(f"🤖 Bot: {BOT_USERNAME}")
         print(f"✅ FFmpeg: {'Available' if FFMPEG_AVAILABLE else 'Not available'}")
         print("="*60 + "\n")
+        print("✅ Video → Animated Video Sticker (3 sec)")
         print("✅ Auto-publish: ON")
-        print("✅ Video: Auto 3 sec cut")
         print("✅ No /done needed")
         print("="*60 + "\n")
         
