@@ -1,9 +1,9 @@
 import os
+import sys
 import json
 import logging
 import sqlite3
 import requests
-import subprocess
 from datetime import datetime
 from io import BytesIO
 from PIL import Image, ImageOps
@@ -11,124 +11,154 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# ============ LOGGING ============
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get('8799309309:AAEy_csS6ESN8NObQlxHMss5YPmYEGOEtcc')
-if not TOKEN:
-    logger.error("❌ BOT_TOKEN not set!")
-    exit(1)
+# ============ TOKEN (Hardcoded) ============
+TOKEN = "8799309309:AAEy_csS6ESN8NObQlxHMss5YPmYEGOEtcc"
 
+# Verify token format
+if not TOKEN or len(TOKEN) < 30:
+    logger.error("❌ Invalid token format!")
+    sys.exit(1)
+
+logger.info(f"✅ Bot token loaded: {TOKEN[:10]}...")
+
+# ============ DATABASE ============
 DATABASE = 'packs.db'
 TEMP_DIR = 'temp'
 
 # Create temp directory
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# ============ DATABASE ============
 def init_db():
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS packs
-                 (pack_name TEXT PRIMARY KEY, creator TEXT, items TEXT, 
-                  published INTEGER, link TEXT, created TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS user_packs
-                 (user_id TEXT, pack_name TEXT, PRIMARY KEY (user_id, pack_name))''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS packs
+                     (pack_name TEXT PRIMARY KEY, creator TEXT, items TEXT, 
+                      published INTEGER, link TEXT, created TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS user_packs
+                     (user_id TEXT, pack_name TEXT, PRIMARY KEY (user_id, pack_name))''')
+        conn.commit()
+        conn.close()
+        logger.info("✅ Database initialized")
+    except Exception as e:
+        logger.error(f"❌ Database error: {e}")
 
 def get_pack(pack_name):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("SELECT * FROM packs WHERE pack_name=?", (pack_name,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {'pack_name': row[0], 'creator': row[1], 
-                'items': json.loads(row[2]) if row[2] else [],
-                'published': bool(row[3]), 'link': row[4], 'created': row[5]}
-    return None
+    try:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("SELECT * FROM packs WHERE pack_name=?", (pack_name,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return {'pack_name': row[0], 'creator': row[1], 
+                    'items': json.loads(row[2]) if row[2] else [],
+                    'published': bool(row[3]), 'link': row[4], 'created': row[5]}
+        return None
+    except Exception as e:
+        logger.error(f"Error getting pack: {e}")
+        return None
 
 def save_pack(pack_name, data):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    items_json = json.dumps(data.get('items', []))
-    c.execute('''INSERT OR REPLACE INTO packs 
-                 (pack_name, creator, items, published, link, created)
-                 VALUES (?, ?, ?, ?, ?, ?)''',
-              (pack_name, data['creator'], items_json, 
-               1 if data.get('published', False) else 0,
-               data.get('link', ''), data.get('created', datetime.now().isoformat())))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        items_json = json.dumps(data.get('items', []))
+        c.execute('''INSERT OR REPLACE INTO packs 
+                     (pack_name, creator, items, published, link, created)
+                     VALUES (?, ?, ?, ?, ?, ?)''',
+                  (pack_name, data['creator'], items_json, 
+                   1 if data.get('published', False) else 0,
+                   data.get('link', ''), data.get('created', datetime.now().isoformat())))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error saving pack: {e}")
+        return False
 
 def delete_pack_db(pack_name):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("DELETE FROM packs WHERE pack_name=?", (pack_name,))
-    c.execute("DELETE FROM user_packs WHERE pack_name=?", (pack_name,))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("DELETE FROM packs WHERE pack_name=?", (pack_name,))
+        c.execute("DELETE FROM user_packs WHERE pack_name=?", (pack_name,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting pack: {e}")
+        return False
 
 def get_user_packs(user_id):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("SELECT pack_name FROM user_packs WHERE user_id=?", (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
+    try:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("SELECT pack_name FROM user_packs WHERE user_id=?", (user_id,))
+        rows = c.fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+    except Exception as e:
+        logger.error(f"Error getting user packs: {e}")
+        return []
 
 def add_user_pack(user_id, pack_name):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO user_packs (user_id, pack_name) VALUES (?, ?)", (user_id, pack_name))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("INSERT OR IGNORE INTO user_packs (user_id, pack_name) VALUES (?, ?)", (user_id, pack_name))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error adding user pack: {e}")
+        return False
 
 def remove_user_pack(user_id, pack_name):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("DELETE FROM user_packs WHERE user_id=? AND pack_name=?", (user_id, pack_name))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("DELETE FROM user_packs WHERE user_id=? AND pack_name=?", (user_id, pack_name))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error removing user pack: {e}")
+        return False
 
 init_db()
 
-# ============ IMAGE CONVERTER (Without OpenCV) ============
+# ============ IMAGE CONVERTER ============
 def convert_to_png(file_content, file_type):
     """Convert any media to PNG format"""
     try:
         if file_type == 'photo':
-            # Convert photo to PNG
             image = Image.open(BytesIO(file_content))
-            # Convert to RGB if needed
             if image.mode in ('RGBA', 'LA', 'P'):
                 image = image.convert('RGB')
-            # Resize to 512x512
             image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
-            # Convert to PNG
             output = BytesIO()
             image.save(output, format='PNG')
             return output.getvalue()
         
         elif file_type == 'sticker':
-            # Sticker is WEBP, convert to PNG
             image = Image.open(BytesIO(file_content))
-            # Convert to RGB if needed
             if image.mode in ('RGBA', 'LA', 'P'):
                 image = image.convert('RGB')
-            # Resize to 512x512
             image = ImageOps.fit(image, (512, 512), Image.Resampling.LANCZOS)
             output = BytesIO()
             image.save(output, format='PNG')
             return output.getvalue()
         
         elif file_type == 'video':
-            # For video, we'll use a simpler approach - just take the thumbnail
-            # Telegram provides video thumbnail
-            # If no thumbnail, use a placeholder
             try:
-                # Try to open as image first (some videos have embedded thumbnails)
                 image = Image.open(BytesIO(file_content))
                 if image.mode in ('RGBA', 'LA', 'P'):
                     image = image.convert('RGB')
@@ -137,13 +167,9 @@ def convert_to_png(file_content, file_type):
                 image.save(output, format='PNG')
                 return output.getvalue()
             except:
-                # If can't open as image, create a simple placeholder
-                # with video icon or first frame using PIL
-                # Create a simple colored image with text
                 img = Image.new('RGB', (512, 512), color=(50, 50, 80))
                 output = BytesIO()
                 img.save(output, format='PNG')
-                logger.warning("Video thumbnail not available, using placeholder")
                 return output.getvalue()
         
         else:
@@ -173,7 +199,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ✅ **Auto Convert Feature:**
 📸 Photo → PNG (512x512)
-🎬 Video → PNG (Thumbnail/Frame)
+🎬 Video → PNG (Thumbnail)
 🏷️ Sticker → PNG (512x512)
 
 📌 **Pack name must end with:** `_by_{bot_username}`
@@ -590,18 +616,36 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ MAIN ============
 def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(CommandHandler("done", done))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(
-        filters.PHOTO | filters.VIDEO | filters.Sticker.ALL, 
-        handle_message
-    ))
-    print("🤖 Bot started!")
-    app.run_polling()
+    try:
+        print("\n" + "="*50)
+        print("🤖 Starting Sticker Pack Bot...")
+        print("="*50)
+        print(f"🔑 Token: {TOKEN[:10]}...{TOKEN[-5:]}")
+        print(f"📊 Database: {DATABASE}")
+        print("="*50 + "\n")
+        
+        # Create application
+        application = Application.builder().token(TOKEN).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("cancel", cancel))
+        application.add_handler(CommandHandler("done", done))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(MessageHandler(
+            filters.PHOTO | filters.VIDEO | filters.Sticker.ALL, 
+            handle_message
+        ))
+        
+        # Start the bot
+        print("✅ Bot is running! Press Ctrl+C to stop.")
+        application.run_polling()
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to start bot: {e}")
+        print(f"\n❌ Error: {e}")
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
